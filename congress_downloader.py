@@ -83,25 +83,59 @@ def process_bulk_download(api_client, db_handler, logger):
 def process_date_range(api_client, db_handler, start_date, end_date, logger):
     """Process data for a specific date range"""
     current_date = start_date
-    
+    failed_dates = []
+    total_items_processed = 0
+
     while current_date <= end_date:
         try:
             logger.info(f"Processing date: {current_date.strftime('%Y-%m-%d')}")
-            
+
             # Get data from API
             data = api_client.get_data_for_date(current_date)
-            
+
+            if not data:
+                logger.info(f"No data found for date {current_date.strftime('%Y-%m-%d')}")
+                current_date += timedelta(days=1)
+                continue
+
             # Store in DynamoDB
-            for item in data:
-                db_handler.store_item(item)
-            
-            logger.info(f"Successfully processed {len(data)} items for {current_date.strftime('%Y-%m-%d')}")
-            
+            successful_items, failed_items = db_handler.batch_store_items(data)
+            total_items_processed += successful_items
+
+            if failed_items:
+                logger.warning(f"{len(failed_items)} items failed for {current_date.strftime('%Y-%m-%d')}")
+                failed_dates.append({
+                    'date': current_date,
+                    'failed_items': failed_items
+                })
+            else:
+                logger.info(f"Successfully processed {len(data)} items for {current_date.strftime('%Y-%m-%d')}")
+
         except Exception as e:
             logger.error(f"Error processing date {current_date}: {str(e)}")
+            failed_dates.append({
+                'date': current_date,
+                'error': str(e)
+            })
             # Continue to next date even if current one fails
-            
+
         current_date += timedelta(days=1)
+
+    # Report final statistics
+    logger.info(f"Date range processing completed:")
+    logger.info(f"Total items processed: {total_items_processed}")
+    logger.info(f"Failed dates: {len(failed_dates)}")
+
+    if failed_dates:
+        logger.info("Failed dates details:")
+        for failed in failed_dates:
+            logger.info(f"Date: {failed['date'].strftime('%Y-%m-%d')}")
+            if 'error' in failed:
+                logger.info(f"Error: {failed['error']}")
+            if 'failed_items' in failed:
+                logger.info(f"Failed items count: {len(failed['failed_items'])}")
+
+    return total_items_processed, failed_dates
 
 if __name__ == "__main__":
     main()
