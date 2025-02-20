@@ -15,76 +15,60 @@ class DynamoHandler:
         """Ensure DynamoDB table exists and is ready"""
         try:
             # Check if table exists
-            existing_table = None
+            self.logger.info(f"Attempting to access DynamoDB table {self.table_name}")
+
             try:
-                existing_table = self.dynamodb.Table(self.table_name)
-                existing_table.load()
+                self.table = self.dynamodb.Table(self.table_name)
+                # Test table access with a simple operation
+                self.table.get_item(Key={'id': 'permission_test'})
+                self.logger.info(f"Successfully connected to table {self.table_name}")
+
             except ClientError as e:
-                if e.response['Error']['Code'] == 'ResourceNotFoundException':
-                    self.logger.info(f"Table {self.table_name} does not exist, creating...")
+                error_code = e.response['Error']['Code']
+                error_message = e.response['Error']['Message']
+
+                if error_code == 'ResourceNotFoundException':
+                    self.logger.error(f"""
+Table {self.table_name} does not exist. 
+Required permission: dynamodb:CreateTable
+Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/{self.table_name}
+""")
+                    raise Exception(f"Table {self.table_name} does not exist")
+
+                elif error_code == 'AccessDeniedException':
+                    self.logger.error(f"""
+Insufficient permissions to access DynamoDB table {self.table_name}
+Required permissions:
+- dynamodb:DescribeTable
+- dynamodb:GetItem
+- dynamodb:PutItem
+- dynamodb:BatchWriteItem
+- dynamodb:Query
+Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/{self.table_name}
+""")
+                    raise Exception("Insufficient DynamoDB permissions")
+
                 else:
+                    self.logger.error(f"Unexpected DynamoDB error: {error_code} - {error_message}")
                     raise
 
-            if existing_table is None:
-                # Create table with GSI for timestamp-based queries
-                table = self.dynamodb.create_table(
-                    TableName=self.table_name,
-                    KeySchema=[
-                        {'AttributeName': 'id', 'KeyType': 'HASH'}
-                    ],
-                    AttributeDefinitions=[
-                        {'AttributeName': 'id', 'AttributeType': 'S'},
-                        {'AttributeName': 'timestamp', 'AttributeType': 'N'}
-                    ],
-                    GlobalSecondaryIndexes=[
-                        {
-                            'IndexName': 'timestamp-index',
-                            'KeySchema': [
-                                {'AttributeName': 'timestamp', 'KeyType': 'HASH'}
-                            ],
-                            'Projection': {'ProjectionType': 'ALL'},
-                            'ProvisionedThroughput': {
-                                'ReadCapacityUnits': 5,
-                                'WriteCapacityUnits': 5
-                            }
-                        }
-                    ],
-                    ProvisionedThroughput={
-                        'ReadCapacityUnits': 5,
-                        'WriteCapacityUnits': 5
-                    }
-                )
-                self.logger.info(f"Waiting for table {self.table_name} to be created...")
-                table.wait_until_exists()
-                self.table = table
-            else:
-                self.table = existing_table
-
-            self.logger.info(f"DynamoDB table {self.table_name} is ready")
-
-        except ClientError as e:
+        except Exception as e:
             self.logger.error(f"Failed to ensure table exists: {str(e)}")
-            raise Exception(f"DynamoDB table setup failed: {str(e)}")
+            raise
 
     def store_item(self, item):
-        """Store a single item in DynamoDB with improved error handling"""
+        """Store a single item in DynamoDB"""
+        if not self.table:
+            raise Exception("DynamoDB table not initialized")
+
         try:
-            # Ensure item has required attributes
             if 'id' not in item:
                 raise ValueError("Item must have an 'id' attribute")
 
-            # Add timestamp for tracking
             item['timestamp'] = int(time.time())
-
-            # Additional validation for bill-specific fields
-            required_fields = ['congress', 'bill_type', 'bill_number']
-            missing_fields = [field for field in required_fields if not item.get(field)]
-            if missing_fields:
-                raise ValueError(f"Missing required fields: {', '.join(missing_fields)}")
 
             self.table.put_item(
                 Item=item,
-                # Implement conditional write to avoid duplicates or ensure newer versions
                 ConditionExpression='attribute_not_exists(id) OR (attribute_exists(update_date) AND update_date < :new_update_date)',
                 ExpressionAttributeValues={
                     ':new_update_date': item.get('update_date', '0')
@@ -94,29 +78,33 @@ class DynamoHandler:
 
         except ClientError as e:
             if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
-                # Item exists with newer or same version - skip
                 self.logger.info(f"Skipping item {item['id']} as a newer version exists")
                 return
+
+            if e.response['Error']['Code'] == 'AccessDeniedException':
+                self.logger.error(f"""
+Failed to write item to DynamoDB table {self.table_name}
+Required permission: dynamodb:PutItem
+Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/{self.table_name}
+""")
+
             self.logger.error(f"DynamoDB operation failed for item {item['id']}: {str(e)}")
-            raise Exception(f"DynamoDB operation failed: {str(e)}")
-        except ValueError as e:
-            self.logger.error(f"Validation error for item {item.get('id', 'unknown')}: {str(e)}")
-            raise
-        except Exception as e:
-            self.logger.error(f"Unexpected error storing item {item.get('id', 'unknown')}: {str(e)}")
             raise
 
     def batch_store_items(self, items):
-        """Store multiple items in DynamoDB using batch write with improved error handling"""
+        """Store multiple items in DynamoDB using batch write"""
+        if not self.table:
+            raise Exception("DynamoDB table not initialized")
+
         try:
             successful_items = 0
             failed_items = []
 
-            # Process items in batches of 25 (DynamoDB batch write limit)
+            # Process items in batches of 25 (DynamoDB limit)
             batch_size = 25
             for i in range(0, len(items), batch_size):
                 batch_items = items[i:i + batch_size]
-                self.logger.info(f"Processing batch of {len(batch_items)} items (total processed: {successful_items})")
+                self.logger.info(f"Processing batch of {len(batch_items)} items")
 
                 try:
                     with self.table.batch_writer() as batch:
@@ -126,15 +114,7 @@ class DynamoHandler:
                                     self.logger.warning(f"Skipping item without ID: {item}")
                                     continue
 
-                                # Add timestamp for tracking
                                 item['timestamp'] = int(time.time())
-
-                                # Validate required fields
-                                required_fields = ['congress', 'bill_type', 'bill_number']
-                                if not all(item.get(field) for field in required_fields):
-                                    self.logger.warning(f"Skipping item {item.get('id')} due to missing required fields")
-                                    continue
-
                                 batch.put_item(Item=item)
                                 successful_items += 1
 
@@ -146,21 +126,24 @@ class DynamoHandler:
                                     'item': item
                                 })
 
-                    self.logger.debug(f"Completed batch: {len(batch_items)} items processed")
-
                 except ClientError as e:
-                    self.logger.error(f"Batch write failed: {str(e)}")
-                    # If batch write fails, add all items to failed_items
+                    if e.response['Error']['Code'] == 'AccessDeniedException':
+                        self.logger.error(f"""
+Failed to batch write items to DynamoDB table {self.table_name}
+Required permission: dynamodb:BatchWriteItem
+Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/{self.table_name}
+""")
+
+                    error_code = e.response['Error']['Code']
+                    error_msg = e.response['Error']['Message']
+                    self.logger.error(f"Batch write failed - Code: {error_code}, Message: {error_msg}")
                     failed_items.extend([{
                         'id': item.get('id', 'unknown'),
-                        'error': str(e),
+                        'error': error_msg,
                         'item': item
                     } for item in batch_items])
 
             self.logger.info(f"Batch write completed: {successful_items} items successful, {len(failed_items)} failed")
-            if failed_items:
-                self.logger.debug(f"Failed items details: {failed_items}")
-
             return successful_items, failed_items
 
         except Exception as e:

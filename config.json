@@ -9,7 +9,7 @@
         }
     },
     "dynamodb": {
-        "table_name": "congress_data",
+        "table_name": "prameya-development-dynamodb-table",
         "region": "us-east-1"
     },
     "logging": {
