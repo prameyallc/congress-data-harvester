@@ -13,8 +13,8 @@
         "region": "us-east-1"
     },
     "logging": {
-        "level": "INFO",
-        "file": "congress_downloader.log",
+        "level": "DEBUG",
+        "file": "logs/congress_downloader.log",
         "max_size": 10485760,
         "backup_count": 5
     },
