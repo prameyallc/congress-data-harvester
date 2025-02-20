@@ -1,0 +1,25 @@
+{
+    "api": {
+        "base_url": "https://api.congress.gov/v3",
+        "api_key": "",
+        "rate_limit": {
+            "requests_per_second": 5,
+            "max_retries": 3,
+            "retry_delay": 1
+        }
+    },
+    "dynamodb": {
+        "table_name": "congress_data",
+        "region": "us-east-1"
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "congress_downloader.log",
+        "max_size": 10485760,
+        "backup_count": 5
+    },
+    "download": {
+        "batch_size": 100,
+        "default_lookback_days": 30
+    }
+}
