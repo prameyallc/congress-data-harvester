@@ -10,7 +10,7 @@
     },
     "dynamodb": {
         "table_name": "prameya-development-dynamodb-table",
-        "region": "us-east-1"
+        "region": "us-west-2"
     },
     "logging": {
         "level": "DEBUG",

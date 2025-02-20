@@ -5,11 +5,13 @@ import sys
 from datetime import datetime, timedelta
 import time
 import boto3
-
 from congress_api import CongressAPI
 from dynamo_handler import DynamoHandler
 from logger_config import setup_logger
 from utils import parse_date, validate_date_range
+from monitoring import metrics
+import threading
+import signal
 
 def load_config():
     try:
@@ -33,9 +35,37 @@ def verify_aws_credentials(logger):
         logger.error(f"AWS credential verification failed: {str(e)}")
         return False
 
+def monitor_resources():
+    """Background thread to monitor system resources"""
+    while True:
+        try:
+            metrics.track_resource_usage()
+            time.sleep(60)  # Collect metrics every minute
+        except Exception as e:
+            logger.error(f"Error collecting resource metrics: {str(e)}")
+
+def start_monitoring():
+    """Start the resource monitoring thread"""
+    monitor_thread = threading.Thread(target=monitor_resources, daemon=True)
+    monitor_thread.start()
+    return monitor_thread
+
+def cleanup(signum, frame):
+    """Cleanup function for graceful shutdown"""
+    logger.info("Shutting down Congress Downloader...")
+    metrics.flush_metrics()
+    sys.exit(0)
+
 def main():
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
+
     config = load_config()
     logger = setup_logger(config['logging'])
+
+    # Start resource monitoring
+    monitor_thread = start_monitoring()
 
     # Verify AWS credentials before proceeding
     if not verify_aws_credentials(logger):
@@ -87,7 +117,11 @@ def main():
 
     except Exception as e:
         logger.error(f"Fatal error: {str(e)}", exc_info=True)
+        metrics.flush_metrics()  # Ensure metrics are sent before exit
         sys.exit(1)
+
+    # Ensure final metrics are sent
+    metrics.flush_metrics()
 
 def process_bulk_download(api_client, db_handler, logger):
     """Process complete bulk download of available data"""

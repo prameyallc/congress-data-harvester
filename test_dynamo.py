@@ -1,5 +1,6 @@
 import boto3
 import logging
+import time
 from botocore.exceptions import ClientError
 
 # Setup logging
@@ -10,7 +11,7 @@ def test_dynamo_permissions():
     """Test specific DynamoDB permissions"""
     try:
         # Initialize DynamoDB client
-        dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+        dynamodb = boto3.resource('dynamodb', region_name='us-west-2')
         table_name = 'prameya-development-dynamodb-table'
 
         # Test 1: Verify we can list tables
@@ -46,7 +47,12 @@ def test_dynamo_permissions():
         # Test 4: Try to write an item
         logger.info("Testing PutItem permission...")
         try:
-            table.put_item(Item={'id': 'test', 'data': 'test'})
+            test_item = {
+                'id': 'test',
+                'data': 'test',
+                'timestamp': int(time.time())
+            }
+            table.put_item(Item=test_item)
             logger.info("PutItem succeeded")
         except ClientError as e:
             logger.error(f"PutItem failed: {e.response['Error']['Message']}")

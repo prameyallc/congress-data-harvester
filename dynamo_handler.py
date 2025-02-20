@@ -2,6 +2,7 @@ import time
 import boto3
 from botocore.exceptions import ClientError
 import logging
+from monitoring import metrics
 
 class DynamoHandler:
     def __init__(self, config):
@@ -20,7 +21,11 @@ class DynamoHandler:
             try:
                 self.table = self.dynamodb.Table(self.table_name)
                 # Test table access with a simple operation
-                self.table.get_item(Key={'id': 'permission_test'})
+                test_item = {
+                    'id': 'permission_test',
+                    'timestamp': int(time.time())
+                }
+                self.table.put_item(Item=test_item)
                 self.logger.info(f"Successfully connected to table {self.table_name}")
 
             except ClientError as e:
@@ -56,11 +61,13 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
             self.logger.error(f"Failed to ensure table exists: {str(e)}")
             raise
 
+    @metrics.track_duration('store_item')
     def store_item(self, item):
         """Store a single item in DynamoDB"""
         if not self.table:
             raise Exception("DynamoDB table not initialized")
 
+        start_time = time.time()
         try:
             if 'id' not in item:
                 raise ValueError("Item must have an 'id' attribute")
@@ -74,9 +81,26 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
                     ':new_update_date': item.get('update_date', '0')
                 }
             )
+
+            duration = time.time() - start_time
+            metrics.track_dynamo_operation(
+                operation='PutItem',
+                table=self.table_name,
+                success=True,
+                duration=duration
+            )
+
             self.logger.debug(f"Successfully stored item with ID: {item['id']}")
 
         except ClientError as e:
+            duration = time.time() - start_time
+            metrics.track_dynamo_operation(
+                operation='PutItem',
+                table=self.table_name,
+                success=False,
+                duration=duration
+            )
+
             if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
                 self.logger.info(f"Skipping item {item['id']} as a newer version exists")
                 return
@@ -91,6 +115,7 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
             self.logger.error(f"DynamoDB operation failed for item {item['id']}: {str(e)}")
             raise
 
+    @metrics.track_duration('batch_store_items')
     def batch_store_items(self, items):
         """Store multiple items in DynamoDB using batch write"""
         if not self.table:
@@ -106,6 +131,7 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
                 batch_items = items[i:i + batch_size]
                 self.logger.info(f"Processing batch of {len(batch_items)} items")
 
+                start_time = time.time()
                 try:
                     with self.table.batch_writer() as batch:
                         for item in batch_items:
@@ -126,7 +152,23 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
                                     'item': item
                                 })
 
+                    duration = time.time() - start_time
+                    metrics.track_dynamo_operation(
+                        operation='BatchWriteItem',
+                        table=self.table_name,
+                        success=True,
+                        duration=duration
+                    )
+
                 except ClientError as e:
+                    duration = time.time() - start_time
+                    metrics.track_dynamo_operation(
+                        operation='BatchWriteItem',
+                        table=self.table_name,
+                        success=False,
+                        duration=duration
+                    )
+
                     if e.response['Error']['Code'] == 'AccessDeniedException':
                         self.logger.error(f"""
 Failed to batch write items to DynamoDB table {self.table_name}
