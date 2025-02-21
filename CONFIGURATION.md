@@ -1,3 +1,12 @@
+# Configuration Guide
+
+This document details the configuration options for the Congress Data Downloader.
+
+## Configuration File (config.json)
+
+The application uses a JSON configuration file with the following structure:
+
+```json
 {
     "api": {
         "base_url": "https://api.congress.gov/v3",
@@ -79,6 +88,46 @@
 | default_start_date | Default start if not specified | 2024-01-01 | Valid date string |
 | default_end_date | Default end if not specified | 2024-12-31 | Valid date string |
 
+## Command Line Arguments
+
+The application supports the following command-line arguments to override configuration settings:
+
+```bash
+# Incremental Mode (Recent Updates)
+python congress_downloader.py --mode incremental --lookback-days 7
+
+# Refresh Mode (Specific Date Range)
+python congress_downloader.py --mode refresh --start-date 2024-01-01 --end-date 2024-01-31
+
+# Bulk Mode (Historical Data)
+python congress_downloader.py --mode bulk
+```
+
+### Available Arguments
+
+| Argument | Description | Required | Default |
+|----------|-------------|----------|----------|
+| --mode | Operation mode (incremental/refresh/bulk) | Yes | N/A |
+| --lookback-days | Days to look back in incremental mode | No | From config |
+| --start-date | Start date for refresh mode | No | From config |
+| --end-date | End date for refresh mode | No | From config |
+| --config | Path to config file | No | config.json |
+| --log-level | Override logging level | No | From config |
+
+## Environment Variables
+
+Required environment variables:
+
+```bash
+# AWS Credentials
+export AWS_ACCESS_KEY_ID=your_access_key
+export AWS_SECRET_ACCESS_KEY=your_secret_key
+export AWS_DEFAULT_REGION=us-west-2
+
+# Congress.gov API Key
+export CONGRESS_API_KEY=your_congress_api_key
+```
+
 ## Performance Tuning
 
 ### Resource Usage Profiles
@@ -107,20 +156,6 @@
         }
     }
 }
-```
-
-## Environment Variables
-
-The following environment variables are required:
-
-```bash
-# AWS Credentials
-export AWS_ACCESS_KEY_ID=your_access_key
-export AWS_SECRET_ACCESS_KEY=your_secret_key
-export AWS_DEFAULT_REGION=us-west-2  # or your preferred region
-
-# Congress.gov API Key
-export CONGRESS_API_KEY=your_congress_api_key
 ```
 
 ## Required IAM Permissions
@@ -153,7 +188,6 @@ Minimum required permissions for DynamoDB:
 The application uses rotating log files with configurable settings:
 
 ```python
-# Example logging configuration
 {
     "logging": {
         "level": "DEBUG",  # Options: DEBUG, INFO, WARNING, ERROR

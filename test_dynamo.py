@@ -1,11 +1,32 @@
 import boto3
 import logging
 import time
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, WaiterError
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('dynamo_test')
+
+def wait_for_table_state(dynamodb, table_name, desired_state='ACTIVE', max_retries=10, delay=5):
+    """Wait for DynamoDB table to reach desired state"""
+    for attempt in range(max_retries):
+        try:
+            response = dynamodb.meta.client.describe_table(TableName=table_name)
+            current_state = response['Table']['TableStatus']
+            if current_state == desired_state:
+                logger.info(f"Table {table_name} is {desired_state}")
+                return True
+            logger.info(f"Table {table_name} is {current_state}, waiting...")
+            time.sleep(delay)
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ResourceNotFoundException':
+                if desired_state == 'DELETED':
+                    logger.info(f"Table {table_name} is deleted")
+                    return True
+                logger.info(f"Table {table_name} not found")
+                return False
+            raise
+    return False
 
 def test_dynamo_permissions():
     """Test specific DynamoDB permissions"""
@@ -18,14 +39,23 @@ def test_dynamo_permissions():
         logger.info("Checking if table exists...")
         try:
             table = dynamodb.Table(table_name)
+            # Wait for any existing operations to complete
+            if not wait_for_table_state(dynamodb, table_name, 'ACTIVE'):
+                logger.warning("Table is not in ACTIVE state, may affect deletion")
+
             table.delete()
-            table.wait_until_not_exists()
-            logger.info(f"Deleted existing table {table_name}")
-            time.sleep(5)  # Wait for AWS to fully remove the table
+            logger.info(f"Initiated deletion of table {table_name}")
+            # Wait for table to be fully deleted
+            if wait_for_table_state(dynamodb, table_name, 'DELETED'):
+                logger.info(f"Successfully deleted table {table_name}")
+            time.sleep(5)  # Additional wait to ensure AWS cleanup
         except ClientError as e:
             if e.response['Error']['Code'] != 'ResourceNotFoundException':
                 logger.error(f"Error deleting table: {str(e)}")
-                raise
+                if e.response['Error']['Code'] == 'ResourceInUseException':
+                    logger.info("Table is still being created or modified, proceeding with test")
+                else:
+                    raise
 
         # Test 2: Create table with correct schema
         logger.info("Creating table with new schema...")
@@ -44,18 +74,15 @@ def test_dynamo_permissions():
                     'KeySchema': [
                         {'AttributeName': 'timestamp', 'KeyType': 'HASH'}
                     ],
-                    'Projection': {'ProjectionType': 'ALL'},
-                    'ProvisionedThroughput': {
-                        'ReadCapacityUnits': 5,
-                        'WriteCapacityUnits': 5
-                    }
+                    'Projection': {'ProjectionType': 'ALL'}
                 }
             ],
             BillingMode='PAY_PER_REQUEST'
         )
 
         # Wait for table to be ready
-        table.wait_until_exists()
+        if not wait_for_table_state(dynamodb, table_name, 'ACTIVE'):
+            raise Exception("Table did not become active in the expected timeframe")
         logger.info("Table created successfully")
 
         # Test 3: Write test item

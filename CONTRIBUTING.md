@@ -1,40 +1,6 @@
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": [
-                "dynamodb:CreateTable",
-                "dynamodb:DeleteTable",
-                "dynamodb:DescribeTable",
-                "dynamodb:PutItem",
-                "dynamodb:BatchWriteItem",
-                "dynamodb:Query",
-                "dynamodb:GetItem"
-            ],
-            "Resource": "arn:aws:dynamodb:*:*:table/congress-data-*"
-        }
-    ]
-}
-```
+# Contributing Guidelines
 
-### CloudWatch Permissions (Optional)
-```json
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": [
-                "cloudwatch:PutMetricData"
-            ],
-            "Resource": "*"
-        }
-    ]
-}
-```
-
-Note: CloudWatch permissions are optional. The application will continue to function without CloudWatch access, with metrics being logged locally instead.
+This document outlines the process for contributing to the Congress Data Downloader project.
 
 ## How to Contribute
 
@@ -227,3 +193,15 @@ def load_config():
 1. Version Bumping
 ```bash
 bumpversion patch  # or minor, major
+```
+
+2. Tag Release
+```bash
+git tag -a v1.0.0 -m "Release version 1.0.0"
+git push origin v1.0.0
+```
+
+3. Update Changelog
+- Document all significant changes
+- Include migration steps if needed
+- Note any breaking changes

@@ -1,3 +1,10 @@
+# Architecture Overview
+
+## System Architecture
+
+The Congress Data Downloader is built with a modular architecture focusing on reliability, scalability, and maintainability. Below is the high-level system diagram:
+
+```mermaid
 graph LR
     A[Congress.gov API] <--> B[Congress Downloader]
     B <--> C[Amazon DynamoDB]
@@ -118,3 +125,84 @@ sequenceDiagram
         Worker2->>DynamoDB: Store data
         Worker3->>DynamoDB: Store data
     end
+```
+
+## Error Handling
+
+1. **API Rate Limiting**
+   - Exponential backoff
+   - Request queuing
+   - Automatic retries
+
+2. **Data Validation**
+   - Schema validation
+   - Data normalization
+   - Error reporting
+
+3. **Storage Operations**
+   - Batch operation retries
+   - Conditional writes
+   - Error recovery
+
+## Performance Optimization
+
+1. **Parallel Processing**
+   - Configurable worker count
+   - Chunk-based processing
+   - Resource monitoring
+
+2. **Caching**
+   - API response caching
+   - Schema validation caching
+   - Configuration caching
+
+3. **Batch Operations**
+   - Optimized batch sizes
+   - Automatic batch splitting
+   - Failed item retry
+
+## Security Considerations
+
+1. **API Authentication**
+   - Secure key storage
+   - Request signing
+   - Rate limit compliance
+
+2. **Data Storage**
+   - Encryption at rest
+   - Access control
+   - Audit logging
+
+3. **Monitoring**
+   - Error tracking
+   - Performance metrics
+   - Resource utilization
+
+## Configuration Management
+
+1. **Environment Variables**
+   - Credential management
+   - Runtime configuration
+   - Feature flags
+
+2. **Application Config**
+   - Date range settings
+   - Performance tuning
+   - Logging configuration
+
+## Future Extensibility
+
+1. **API Versioning**
+   - Version compatibility
+   - Schema migration
+   - Feature deprecation
+
+2. **Data Storage**
+   - Multiple storage backends
+   - Data archival
+   - Backup strategies
+
+3. **Monitoring**
+   - Custom metrics
+   - Alert integration
+   - Dashboard creation
