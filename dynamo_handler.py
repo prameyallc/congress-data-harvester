@@ -43,11 +43,7 @@ class DynamoHandler:
                                 'KeySchema': [
                                     {'AttributeName': 'timestamp', 'KeyType': 'HASH'}
                                 ],
-                                'Projection': {'ProjectionType': 'ALL'},
-                                'ProvisionedThroughput': {
-                                    'ReadCapacityUnits': 5,
-                                    'WriteCapacityUnits': 5
-                                }
+                                'Projection': {'ProjectionType': 'ALL'}
                             }
                         ],
                         BillingMode='PAY_PER_REQUEST'
