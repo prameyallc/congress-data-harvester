@@ -8,7 +8,7 @@ import boto3
 from congress_api import CongressAPI
 from dynamo_handler import DynamoHandler
 from logger_config import setup_logger
-from utils import parse_date, validate_date_range
+from utils import parse_date
 from monitoring import metrics
 import threading
 import signal
@@ -162,6 +162,49 @@ def process_bulk_download(api_client, db_handler, logger):
         logger.error(f"Bulk download failed: {str(e)}", exc_info=True)
         raise
 
+def validate_date_range(start_date: datetime, end_date: datetime, config: Dict) -> Tuple[bool, str]:
+    """Validate the date range against configuration limits.
+
+    Args:
+        start_date: Start date for data download
+        end_date: End date for data download
+        config: Application configuration dictionary
+
+    Returns:
+        Tuple of (is_valid: bool, error_message: str)
+    """
+    try:
+        # Get date range limits from config
+        date_config = config['download']['date_ranges']
+        min_date = datetime.strptime(date_config['min_date'], '%Y-%m-%d')
+        max_range_days = date_config['max_range_days']
+
+        # Validate date range
+        if start_date > end_date:
+            return False, "Start date must be before end date"
+
+        # Check against minimum allowed date
+        if start_date < min_date:
+            return False, f"Start date cannot be before {min_date.strftime('%Y-%m-%d')}"
+
+        # Check range size
+        date_range = (end_date - start_date).days
+        if date_range > max_range_days:
+            return False, f"Date range ({date_range} days) exceeds maximum allowed ({max_range_days} days)"
+
+        # Ensure not in future
+        if end_date > datetime.now():
+            return False, "End date cannot be in the future"
+
+        return True, ""
+
+    except KeyError as e:
+        return False, f"Missing configuration key: {str(e)}"
+    except ValueError as e:
+        return False, f"Date validation error: {str(e)}"
+    except Exception as e:
+        return False, f"Unexpected error in date validation: {str(e)}"
+
 def main():
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, cleanup)
@@ -214,14 +257,18 @@ def main():
 
         elif args.mode == 'refresh':
             if not args.start_date or not args.end_date:
-                logger.error("Start and end dates required for refresh mode")
-                sys.exit(1)
+                # Use defaults from config if not specified
+                date_config = config['download']['date_ranges']
+                start = parse_date(args.start_date or date_config['default_start_date'])
+                end = parse_date(args.end_date or date_config['default_end_date'])
+            else:
+                start = parse_date(args.start_date)
+                end = parse_date(args.end_date)
 
-            start = parse_date(args.start_date)
-            end = parse_date(args.end_date)
-
-            if not validate_date_range(start, end):
-                logger.error("Invalid date range")
+            # Validate date range
+            is_valid, error_msg = validate_date_range(start, end, config)
+            if not is_valid:
+                logger.error(f"Invalid date range: {error_msg}")
                 sys.exit(1)
 
             logger.info(f"Starting refresh from {start} to {end}")
@@ -230,7 +277,7 @@ def main():
 
     except Exception as e:
         logger.error(f"Fatal error: {str(e)}", exc_info=True)
-        metrics.flush_metrics()  # Ensure metrics are sent before exit
+        metrics.flush_metrics()
         sys.exit(1)
 
     # Ensure final metrics are sent

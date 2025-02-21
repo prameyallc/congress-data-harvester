@@ -1,7 +1,6 @@
 {
     "api": {
         "base_url": "https://api.congress.gov/v3",
-        "api_key": "",  // Use environment variable instead
         "rate_limit": {
             "requests_per_second": 5,
             "max_retries": 3,
@@ -21,6 +20,12 @@
     "download": {
         "batch_size": 100,
         "default_lookback_days": 30,
+        "date_ranges": {
+            "max_range_days": 365,
+            "min_date": "1789-03-04",
+            "default_start_date": "2024-01-01",
+            "default_end_date": "2024-12-31"
+        },
         "parallel": {
             "max_workers": 3,
             "chunk_size": 5
@@ -65,6 +70,15 @@
 | max_workers | Maximum parallel workers | 3 | 1-10 |
 | chunk_size | Items per worker | 5 | 1-100 |
 
+### Date Range Configuration
+
+| Parameter | Description | Default | Valid Values |
+|-----------|-------------|---------|--------------|
+| max_range_days | Maximum days in a single request | 365 | ≥1 |
+| min_date | Earliest allowed date | 1789-03-04 | Valid date string |
+| default_start_date | Default start if not specified | 2024-01-01 | Valid date string |
+| default_end_date | Default end if not specified | 2024-12-31 | Valid date string |
+
 ## Performance Tuning
 
 ### Resource Usage Profiles
@@ -95,27 +109,21 @@
 }
 ```
 
-## Troubleshooting
+## Environment Variables
 
-### Common Issues
+The following environment variables are required:
 
-1. **DynamoDB Connection Errors**
-   - Verify AWS credentials
-   - Check table name uniqueness
-   - Ensure proper IAM permissions
-   - Verify region setting
+```bash
+# AWS Credentials
+export AWS_ACCESS_KEY_ID=your_access_key
+export AWS_SECRET_ACCESS_KEY=your_secret_key
+export AWS_DEFAULT_REGION=us-west-2  # or your preferred region
 
-2. **API Rate Limiting**
-   - Reduce parallel workers
-   - Increase retry delay
-   - Verify API key validity
+# Congress.gov API Key
+export CONGRESS_API_KEY=your_congress_api_key
+```
 
-3. **Memory Issues**
-   - Reduce batch size
-   - Decrease parallel workers
-   - Monitor system resources
-
-### Required IAM Permissions
+## Required IAM Permissions
 
 Minimum required permissions for DynamoDB:
 

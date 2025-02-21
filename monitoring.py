@@ -10,19 +10,29 @@ class MetricsCollector:
     def __init__(self, service_name: str, region: str = 'us-west-2'):
         self.service_name = service_name
         self.logger = logging.getLogger('congress_downloader')
+        self.cloudwatch_enabled = False
         try:
             self.cloudwatch = boto3.client('cloudwatch', region_name=region)
+            # Test CloudWatch permissions
+            self.cloudwatch.put_metric_data(
+                Namespace=f'CongressDownloader/{self.service_name}',
+                MetricData=[{
+                    'MetricName': 'startup_test',
+                    'Value': 1.0,
+                    'Unit': 'Count'
+                }]
+            )
+            self.cloudwatch_enabled = True
             self.metrics_buffer = []
             self.buffer_size = 20  # Batch size for CloudWatch metrics
         except Exception as e:
-            self.logger.error(f"Failed to initialize CloudWatch client: {str(e)}")
+            self.logger.info(f"CloudWatch metrics disabled: {str(e)}")
             self.cloudwatch = None
             self.metrics_buffer = []
 
     def _put_metric(self, name: str, value: float, unit: str, dimensions: Dict[str, str] = None):
         """Send metric to CloudWatch with buffering"""
-        if not self.cloudwatch:
-            self.logger.warning(f"CloudWatch metrics disabled - skipping metric: {name}")
+        if not self.cloudwatch_enabled:
             return
 
         try:
@@ -45,11 +55,12 @@ class MetricsCollector:
             if len(self.metrics_buffer) >= self.buffer_size:
                 self.flush_metrics()
         except Exception as e:
-            self.logger.error(f"Failed to buffer metric {name}: {str(e)}")
+            if not str(e).startswith('CloudWatch metrics disabled'):
+                self.logger.debug(f"Failed to buffer metric {name}: {str(e)}")
 
     def flush_metrics(self):
         """Flush buffered metrics to CloudWatch"""
-        if not self.cloudwatch or not self.metrics_buffer:
+        if not self.cloudwatch_enabled or not self.metrics_buffer:
             return
 
         try:
@@ -58,9 +69,9 @@ class MetricsCollector:
                 MetricData=self.metrics_buffer
             )
             self.metrics_buffer.clear()
-
         except Exception as e:
-            self.logger.error(f"Failed to send metrics to CloudWatch: {str(e)}")
+            if not str(e).startswith('CloudWatch metrics disabled'):
+                self.logger.debug(f"Failed to send metrics to CloudWatch: {str(e)}")
 
     def track_duration(self, operation: str):
         """Decorator to track operation duration"""
@@ -137,7 +148,7 @@ class MetricsCollector:
                 self._put_metric('disk_read_bytes', disk_io.read_bytes, 'Bytes')
                 self._put_metric('disk_write_bytes', disk_io.write_bytes, 'Bytes')
         except Exception as e:
-            self.logger.error(f"Failed to collect resource metrics: {str(e)}")
+            self.logger.debug(f"Failed to collect resource metrics: {str(e)}")
 
 # Global metrics collector instance
 metrics = MetricsCollector('Development')

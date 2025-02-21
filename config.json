@@ -21,6 +21,12 @@
     "download": {
         "batch_size": 100,
         "default_lookback_days": 30,
+        "date_ranges": {
+            "max_range_days": 365,
+            "min_date": "1789-03-04",
+            "default_start_date": "2024-01-01",
+            "default_end_date": "2024-12-31"
+        },
         "parallel": {
             "max_workers": 3,
             "chunk_size": 5
