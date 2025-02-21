@@ -7,6 +7,7 @@ from urllib3.util.retry import Retry
 import logging
 from random import uniform
 from monitoring import metrics
+from data_validator import DataValidator
 
 class CongressAPI:
     def __init__(self, config):
@@ -19,6 +20,7 @@ class CongressAPI:
         self.last_request_time = 0
         self.consecutive_errors = 0
         self.logger = logging.getLogger('congress_downloader')
+        self.validator = DataValidator()
 
     def _setup_session(self):
         session = requests.Session()
@@ -117,6 +119,10 @@ class CongressAPI:
             limit = 20
             max_retries = 3
             retry_count = 0
+
+            invalid_bills = 0
+            validation_errors = {}
+
             while True:
                 try:
                     params = {
@@ -127,13 +133,17 @@ class CongressAPI:
                         'fromDateTime': f"{date_str}T00:00:00Z",
                         'toDateTime': f"{date_str}T23:59:59Z"
                     }
+
                     self.logger.info(f"Fetching bills for date {date_str} (offset: {offset})")
                     response_data = self._make_request('bill', params)
                     bills = response_data.get('bills', [])
+
                     if not bills:
                         break
+
                     processed_count = 0
                     error_count = 0
+
                     for bill in bills:
                         try:
                             bill_id = bill.get('billId') or self._generate_bill_id(bill)
@@ -141,11 +151,13 @@ class CongressAPI:
                                 self.logger.warning(f"Unable to generate ID for bill: {bill}")
                                 error_count += 1
                                 continue
+
                             origin_chamber_info = bill.get('originChamber', {})
                             origin_chamber = (origin_chamber_info.get('name', '') if isinstance(origin_chamber_info, dict) else str(origin_chamber_info))
                             latest_action = bill.get('latestAction', {})
                             if isinstance(latest_action, str):
                                 latest_action = {'text': latest_action}
+
                             transformed_bill = {
                                 'id': bill_id,
                                 'congress': bill.get('congress', current_congress),
@@ -155,25 +167,59 @@ class CongressAPI:
                                 'bill_number': bill.get('number', ''),
                                 'version': 1,
                                 'origin_chamber': origin_chamber,
-                                'latest_action': latest_action,
+                                'origin_chamber_code': bill.get('originChamberCode', ''),
+                                'latest_action': {
+                                    'text': latest_action.get('text', ''),
+                                    'action_date': latest_action.get('actionDate', ''),
+                                },
                                 'update_date_including_text': bill.get('updateDateIncludingText', ''),
                                 'introduced_date': bill.get('introducedDate', ''),
                                 'sponsors': bill.get('sponsors', []),
-                                'committees': bill.get('committees', [])
+                                'committees': bill.get('committees', []),
+                                'url': bill.get('url', '')
                             }
+
+                            # Validate and clean the bill data
+                            is_valid, errors = self.validator.validate_bill(transformed_bill)
+                            if not is_valid:
+                                invalid_bills += 1
+                                validation_errors[bill_id] = errors
+                                self.logger.warning(f"Bill {bill_id} failed validation: {errors}")
+                                error_count += 1
+                                continue
+
+                            # Clean and normalize the data
+                            transformed_bill = self.validator.cleanup_bill(transformed_bill)
+
+                            # Validate sponsors and committees
+                            for sponsor in transformed_bill['sponsors']:
+                                is_valid, errors = self.validator.validate_sponsor(sponsor)
+                                if not is_valid:
+                                    self.logger.warning(f"Invalid sponsor in bill {bill_id}: {errors}")
+
+                            for committee in transformed_bill['committees']:
+                                is_valid, errors = self.validator.validate_committee(committee)
+                                if not is_valid:
+                                    self.logger.warning(f"Invalid committee in bill {bill_id}: {errors}")
+
                             all_bills.append(transformed_bill)
                             processed_count += 1
+
                         except Exception as e:
                             self.logger.error(f"Failed to transform bill {bill.get('billId', 'unknown')}: {str(e)}")
                             error_count += 1
                             continue
+
                     metrics.track_bills_processed(processed_count, success=True)
                     if error_count > 0:
                         metrics.track_bills_processed(error_count, success=False)
+
                     if len(bills) < limit:
                         break
+
                     offset += limit
                     retry_count = 0
+
                 except Exception as e:
                     retry_count += 1
                     if retry_count >= max_retries:
@@ -181,11 +227,18 @@ class CongressAPI:
                         offset += limit
                         retry_count = 0
                         continue
+
                     wait_time = 2 ** retry_count
                     self.logger.warning(f"Retrying after {wait_time} seconds. Attempt {retry_count} of {max_retries}")
                     time.sleep(wait_time)
-            self.logger.info(f"Retrieved {len(all_bills)} bills for date {date_str}")
+
+            if invalid_bills > 0:
+                self.logger.warning(f"Total invalid bills for {date_str}: {invalid_bills}")
+                self.logger.debug(f"Validation errors: {validation_errors}")
+
+            self.logger.info(f"Retrieved {len(all_bills)} valid bills for date {date_str}")
             return all_bills
+
         except Exception as e:
             self.logger.error(f"Failed to get data for date {date}: {str(e)}")
             raise

@@ -14,58 +14,88 @@ def test_dynamo_permissions():
         dynamodb = boto3.resource('dynamodb', region_name='us-west-2')
         table_name = 'prameya-development-dynamodb-table'
 
-        # Test 1: Verify we can list tables
-        logger.info("Testing ListTables permission...")
-        tables = list(dynamodb.tables.all())
-        logger.info(f"ListTables succeeded, found {len(tables)} tables")
-
-        # Test 2: Try to describe our table
-        logger.info(f"Testing DescribeTable permission for {table_name}...")
+        # Test 1: Delete table if exists
+        logger.info("Checking if table exists...")
         try:
             table = dynamodb.Table(table_name)
-            table.load()
-            logger.info("DescribeTable succeeded")
+            table.delete()
+            table.wait_until_not_exists()
+            logger.info(f"Deleted existing table {table_name}")
+            time.sleep(5)  # Wait for AWS to fully remove the table
         except ClientError as e:
-            if e.response['Error']['Code'] == 'AccessDeniedException':
-                logger.error("Missing DescribeTable permission")
-            elif e.response['Error']['Code'] == 'ResourceNotFoundException':
-                logger.info("Table does not exist, will test creation permission")
-                try:
-                    # Test 3: Try to create the table
-                    logger.info("Testing CreateTable permission...")
-                    table = dynamodb.create_table(
-                        TableName=table_name,
-                        KeySchema=[{'AttributeName': 'id', 'KeyType': 'HASH'}],
-                        AttributeDefinitions=[{'AttributeName': 'id', 'AttributeType': 'S'}],
-                        BillingMode='PAY_PER_REQUEST'
-                    )
-                    logger.info("CreateTable succeeded")
-                except ClientError as create_error:
-                    logger.error(f"CreateTable failed: {create_error.response['Error']['Message']}")
-            raise
+            if e.response['Error']['Code'] != 'ResourceNotFoundException':
+                logger.error(f"Error deleting table: {str(e)}")
+                raise
 
-        # Test 4: Try to write an item
+        # Test 2: Create table with correct schema
+        logger.info("Creating table with new schema...")
+        table = dynamodb.create_table(
+            TableName=table_name,
+            KeySchema=[
+                {'AttributeName': 'id', 'KeyType': 'HASH'}
+            ],
+            AttributeDefinitions=[
+                {'AttributeName': 'id', 'AttributeType': 'S'},
+                {'AttributeName': 'timestamp', 'AttributeType': 'N'}
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'timestamp-index',
+                    'KeySchema': [
+                        {'AttributeName': 'timestamp', 'KeyType': 'HASH'}
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {
+                        'ReadCapacityUnits': 5,
+                        'WriteCapacityUnits': 5
+                    }
+                }
+            ],
+            BillingMode='PAY_PER_REQUEST'
+        )
+
+        # Wait for table to be ready
+        table.wait_until_exists()
+        logger.info("Table created successfully")
+
+        # Test 3: Write test item
         logger.info("Testing PutItem permission...")
-        try:
-            test_item = {
-                'id': 'test',
-                'data': 'test',
-                'timestamp': int(time.time())
-            }
-            table.put_item(Item=test_item)
-            logger.info("PutItem succeeded")
-        except ClientError as e:
-            logger.error(f"PutItem failed: {e.response['Error']['Message']}")
-            raise
+        test_item = {
+            'id': '117-hr-3076',
+            'congress': 117,
+            'title': 'Postal Service Reform Act of 2022',
+            'update_date': '2022-09-29',
+            'bill_type': 'hr',
+            'bill_number': 3076,
+            'version': 1,
+            'origin_chamber': 'House',
+            'origin_chamber_code': 'H',
+            'latest_action': {
+                'text': 'Became Public Law No: 117-108.',
+                'action_date': '2022-04-06'
+            },
+            'update_date_including_text': '2022-09-29T03:27:05Z',
+            'introduced_date': '2022-09-29',
+            'sponsors': [],
+            'committees': [],
+            'url': 'https://api.congress.gov/v3/bill/117/hr/3076?format=json',
+            'timestamp': int(time.time())
+        }
 
-        # Test 5: Try to read the item
+        table.put_item(Item=test_item)
+        logger.info("PutItem succeeded")
+
+        # Test 4: Read the item back
         logger.info("Testing GetItem permission...")
-        try:
-            table.get_item(Key={'id': 'test'})
+        response = table.get_item(Key={'id': '117-hr-3076'})
+        item = response.get('Item')
+
+        if item:
             logger.info("GetItem succeeded")
-        except ClientError as e:
-            logger.error(f"GetItem failed: {e.response['Error']['Message']}")
-            raise
+            logger.info(f"Retrieved item: {item}")
+        else:
+            logger.error("GetItem succeeded but no item found")
+            return False
 
         return True
 

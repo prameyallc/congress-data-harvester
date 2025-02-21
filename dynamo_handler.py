@@ -19,7 +19,42 @@ class DynamoHandler:
             self.logger.info(f"Attempting to access DynamoDB table {self.table_name}")
 
             try:
-                self.table = self.dynamodb.Table(self.table_name)
+                # Try to describe the table first
+                dynamodb_client = self.dynamodb.meta.client
+                try:
+                    dynamodb_client.describe_table(TableName=self.table_name)
+                    self.table = self.dynamodb.Table(self.table_name)
+                    self.logger.info(f"Successfully connected to table {self.table_name}")
+                except dynamodb_client.exceptions.ResourceNotFoundException:
+                    # Table doesn't exist, create it
+                    self.logger.info(f"Table {self.table_name} not found, creating...")
+                    self.table = self.dynamodb.create_table(
+                        TableName=self.table_name,
+                        KeySchema=[
+                            {'AttributeName': 'id', 'KeyType': 'HASH'}
+                        ],
+                        AttributeDefinitions=[
+                            {'AttributeName': 'id', 'AttributeType': 'S'},
+                            {'AttributeName': 'timestamp', 'AttributeType': 'N'}
+                        ],
+                        GlobalSecondaryIndexes=[
+                            {
+                                'IndexName': 'timestamp-index',
+                                'KeySchema': [
+                                    {'AttributeName': 'timestamp', 'KeyType': 'HASH'}
+                                ],
+                                'Projection': {'ProjectionType': 'ALL'},
+                                'ProvisionedThroughput': {
+                                    'ReadCapacityUnits': 5,
+                                    'WriteCapacityUnits': 5
+                                }
+                            }
+                        ],
+                        BillingMode='PAY_PER_REQUEST'
+                    )
+                    self.table.wait_until_exists()
+                    self.logger.info(f"Created table {self.table_name}")
+
                 # Test table access with a simple operation
                 test_item = {
                     'id': 'permission_test',
@@ -61,7 +96,6 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
             self.logger.error(f"Failed to ensure table exists: {str(e)}")
             raise
 
-    @metrics.track_duration('store_item')
     def store_item(self, item):
         """Store a single item in DynamoDB"""
         if not self.table:
@@ -72,6 +106,7 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
             if 'id' not in item:
                 raise ValueError("Item must have an 'id' attribute")
 
+            # Add timestamp for the secondary index
             item['timestamp'] = int(time.time())
 
             self.table.put_item(
@@ -83,23 +118,29 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
             )
 
             duration = time.time() - start_time
-            metrics.track_dynamo_operation(
-                operation='PutItem',
-                table=self.table_name,
-                success=True,
-                duration=duration
-            )
+            try:
+                metrics.track_dynamo_operation(
+                    operation='PutItem',
+                    table=self.table_name,
+                    success=True,
+                    duration=duration
+                )
+            except Exception as metric_error:
+                self.logger.warning(f"Failed to track metrics: {str(metric_error)}")
 
             self.logger.debug(f"Successfully stored item with ID: {item['id']}")
 
         except ClientError as e:
             duration = time.time() - start_time
-            metrics.track_dynamo_operation(
-                operation='PutItem',
-                table=self.table_name,
-                success=False,
-                duration=duration
-            )
+            try:
+                metrics.track_dynamo_operation(
+                    operation='PutItem',
+                    table=self.table_name,
+                    success=False,
+                    duration=duration
+                )
+            except Exception as metric_error:
+                self.logger.warning(f"Failed to track metrics: {str(metric_error)}")
 
             if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
                 self.logger.info(f"Skipping item {item['id']} as a newer version exists")
@@ -115,7 +156,6 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
             self.logger.error(f"DynamoDB operation failed for item {item['id']}: {str(e)}")
             raise
 
-    @metrics.track_duration('batch_store_items')
     def batch_store_items(self, items):
         """Store multiple items in DynamoDB using batch write"""
         if not self.table:
@@ -153,21 +193,27 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
                                 })
 
                     duration = time.time() - start_time
-                    metrics.track_dynamo_operation(
-                        operation='BatchWriteItem',
-                        table=self.table_name,
-                        success=True,
-                        duration=duration
-                    )
+                    try:
+                        metrics.track_dynamo_operation(
+                            operation='BatchWriteItem',
+                            table=self.table_name,
+                            success=True,
+                            duration=duration
+                        )
+                    except Exception as metric_error:
+                        self.logger.warning(f"Failed to track metrics: {str(metric_error)}")
 
                 except ClientError as e:
                     duration = time.time() - start_time
-                    metrics.track_dynamo_operation(
-                        operation='BatchWriteItem',
-                        table=self.table_name,
-                        success=False,
-                        duration=duration
-                    )
+                    try:
+                        metrics.track_dynamo_operation(
+                            operation='BatchWriteItem',
+                            table=self.table_name,
+                            success=False,
+                            duration=duration
+                        )
+                    except Exception as metric_error:
+                        self.logger.warning(f"Failed to track metrics: {str(metric_error)}")
 
                     if e.response['Error']['Code'] == 'AccessDeniedException':
                         self.logger.error(f"""

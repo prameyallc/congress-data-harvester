@@ -20,6 +20,10 @@
     },
     "download": {
         "batch_size": 100,
-        "default_lookback_days": 30
+        "default_lookback_days": 30,
+        "parallel": {
+            "max_workers": 3,
+            "chunk_size": 5
+        }
     }
 }
