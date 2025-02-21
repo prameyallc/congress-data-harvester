@@ -23,6 +23,7 @@ class CongressBaseAPI:
         self.last_request_time = 0
         self.consecutive_errors = 0
         self.logger = logging.getLogger('congress_downloader')
+        self.timeout = (5, 30)  # (connect timeout, read timeout)
 
     def _setup_session(self):
         """Set up requests session with retry strategy"""
@@ -67,16 +68,13 @@ class CongressBaseAPI:
         start_time = time.time()
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=self.timeout)
             duration = time.time() - start_time
             metrics.track_api_request(
                 endpoint=endpoint,
                 status_code=response.status_code,
                 duration=duration
             )
-
-            self.logger.debug(f"Request to: {url}")
-            self.logger.debug(f"Response status: {response.status_code}")
 
             if response.status_code == 200:
                 self.consecutive_errors = 0
@@ -100,6 +98,17 @@ class CongressBaseAPI:
             self.logger.error(f"Unexpected status code {response.status_code}: {response.text}")
             response.raise_for_status()
 
+        except requests.exceptions.Timeout as e:
+            duration = time.time() - start_time
+            self.logger.error(f"Request timed out for endpoint {endpoint}: {str(e)}")
+            metrics.track_api_request(
+                endpoint=endpoint,
+                status_code=408,
+                duration=duration
+            )
+            self.consecutive_errors += 1
+            raise Exception(f"Request timed out: {str(e)}")
+
         except requests.exceptions.RequestException as e:
             duration = time.time() - start_time
             metrics.track_api_request(
@@ -110,6 +119,74 @@ class CongressBaseAPI:
             self.consecutive_errors += 1
             self.logger.error(f"Request failed: {str(e)}")
             raise Exception(f"Request failed: {str(e)}")
+
+    def get_available_endpoints(self) -> Dict[str, Any]:
+        """Get list of available API endpoints and their details"""
+        try:
+            # Query standard endpoints we know about
+            standard_endpoints = [
+                'bill', 'amendment', 'nomination', 'treaty', 
+                'committee', 'hearing', 'committee-report',
+                'congressional-record', 'house-communication',
+                'house-requirement', 'senate-communication',
+                'member', 'summaries'
+            ]
+            available_endpoints = {}
+
+            for endpoint in standard_endpoints:
+                try:
+                    self.logger.info(f"Checking endpoint: {endpoint}")
+                    # Use minimal parameters to test endpoint
+                    response = self._make_request(endpoint, {
+                        'limit': 1, 
+                        'format': 'json',
+                        'offset': 0
+                    })
+
+                    if response:
+                        # If endpoint responds successfully, add it to available endpoints
+                        available_endpoints[endpoint] = {
+                            'name': endpoint,
+                            'url': f"{self.base_url}/{endpoint}",
+                            'status': 'available',
+                            'response_keys': list(response.keys()) if isinstance(response, dict) else []
+                        }
+                        self.logger.info(f"Found active endpoint: {endpoint}")
+                except requests.exceptions.Timeout as e:
+                    self.logger.warning(f"Endpoint {endpoint} timed out: {str(e)}")
+                    continue
+                except requests.exceptions.RequestException as e:
+                    self.logger.warning(f"Endpoint {endpoint} request failed: {str(e)}")
+                    continue
+                except Exception as e:
+                    self.logger.warning(f"Endpoint {endpoint} error: {str(e)}")
+                    continue
+
+            if not available_endpoints:
+                self.logger.error("No endpoints available or accessible")
+                raise Exception("No endpoints available or accessible")
+
+            return available_endpoints
+        except Exception as e:
+            self.logger.error(f"Failed to get available endpoints: {str(e)}")
+            raise
+
+    def _rate_limit_wait(self):
+        """Implement rate limiting with jitter"""
+        current_time = time.time()
+        time_since_last_request = current_time - self.last_request_time
+        base_wait = 1.0 / self.rate_limit['requests_per_second']
+        jitter = uniform(-0.1 * base_wait, 0.1 * base_wait)
+        wait_time = base_wait + jitter
+        if self.consecutive_errors > 0:
+            backoff_multiplier = min(2 ** self.consecutive_errors, 60)
+            wait_time *= backoff_multiplier
+            self.logger.warning(f"Rate limit backoff: waiting {wait_time:.2f} seconds after {self.consecutive_errors} consecutive errors")
+        if time_since_last_request < wait_time:
+            sleep_time = wait_time - time_since_last_request
+            self.logger.debug(f"Rate limiting: waiting {sleep_time:.2f} seconds")
+            time.sleep(sleep_time)
+        self.last_request_time = time.time()
 
     def get_current_congress(self) -> int:
         """Get the current Congress number"""
@@ -127,15 +204,6 @@ class CongressBaseAPI:
                 wait_time = 2 ** retry_count
                 self.logger.warning(f"Retrying current congress lookup after {wait_time} seconds")
                 time.sleep(wait_time)
-
-    def get_available_endpoints(self) -> Dict[str, Any]:
-        """Get list of available API endpoints and their details"""
-        try:
-            response = self._make_request('', {'format': 'json'})
-            return response
-        except Exception as e:
-            self.logger.error(f"Failed to get available endpoints: {str(e)}")
-            raise
 
     def get_earliest_date(self) -> datetime:
         """Get earliest available date for data"""

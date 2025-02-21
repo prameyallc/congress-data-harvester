@@ -19,6 +19,10 @@ args = "Congress Data Downloader"
 task = "workflow.run"
 args = "DynamoDB Test"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Health Check"
+
 [[workflows.workflow]]
 name = "Congress Data Downloader"
 author = "agent"
@@ -46,6 +50,20 @@ task = "packager.installForAll"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python test_dynamo.py"
+
+[[workflows.workflow]]
+name = "Health Check"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python health_check.py"
 
 [deployment]
 run = ["sh", "-c", "python congress_downloader.py --mode refresh --start-date 2024-01-01 --end-date 2024-01-31"]

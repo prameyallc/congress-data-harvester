@@ -1,7 +1,14 @@
+#!/usr/bin/env python3
+import json
+import sys
 import boto3
-import logging
+import requests
+from congress_api import CongressAPI
+from logger_config import setup_logger
+import os
 import time
-from botocore.exceptions import ClientError, WaiterError
+from botocore.exceptions import ClientError
+import logging
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -31,24 +38,6 @@ def describe_table(dynamodb, table_name):
         logger.error(f"Error describing table: {str(e)}")
         raise
 
-def wait_for_table_state(dynamodb, table_name, desired_state='ACTIVE', max_retries=10, delay=5):
-    """Wait for DynamoDB table to reach desired state"""
-    for attempt in range(max_retries):
-        try:
-            response = dynamodb.meta.client.describe_table(TableName=table_name)
-            current_state = response['Table']['TableStatus']
-            if current_state == desired_state:
-                logger.info(f"Table {table_name} is {desired_state}")
-                return True
-            logger.info(f"Table {table_name} is {current_state}, waiting...")
-            time.sleep(delay)
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'ResourceNotFoundException':
-                logger.info(f"Table {table_name} not found")
-                return False
-            raise
-    return False
-
 def test_dynamo_permissions():
     """Test specific DynamoDB permissions"""
     try:
@@ -61,20 +50,20 @@ def test_dynamo_permissions():
         try:
             table = dynamodb.Table(table_name)
             table_desc = describe_table(dynamodb, table_name)
+            logger.info(f"Table {table_name} is {table_desc['TableStatus']}")
             logger.info("Table accessed successfully")
 
         except ClientError as e:
             logger.error(f"Error accessing table: {str(e)}")
             return False
 
-        # Create test items based on actual schema
+        # Create test timestamp
         timestamp = int(time.time())
 
         # Test Bill
         bill_item = {
-            'id': 'test_117_hr_3076',  # Using underscores to avoid parsing issues
-            'timestamp': timestamp,
-            'type': 'bill',  # Added as regular attribute
+            'id': f'test_bill_{timestamp}',
+            'type': 'bill',
             'congress': 117,
             'title': 'Postal Service Reform Act of 2022',
             'update_date': '2022-09-29',
@@ -86,7 +75,9 @@ def test_dynamo_permissions():
             'latest_action': {
                 'text': 'Became Public Law No: 117-108.',
                 'action_date': '2022-04-06'
-            }
+            },
+            'timestamp': timestamp,
+            'expiry_time': int(time.time()) + 3600  # 1 hour TTL
         }
 
         # Write test item
@@ -101,7 +92,9 @@ def test_dynamo_permissions():
         # Read test item
         logger.info("Testing read operations...")
         try:
-            response = table.get_item(Key={'id': bill_item['id']})
+            response = table.get_item(
+                Key={'id': bill_item['id']}
+            )
             retrieved_item = response.get('Item')
             if retrieved_item:
                 logger.info(f"Successfully retrieved test bill item")
@@ -130,7 +123,9 @@ def test_dynamo_permissions():
         # Clean up test item
         logger.info("Cleaning up test item...")
         try:
-            table.delete_item(Key={'id': bill_item['id']})
+            table.delete_item(
+                Key={'id': bill_item['id']}
+            )
             logger.info("Successfully deleted test bill item")
         except ClientError as e:
             logger.warning(f"Failed to delete test item {bill_item['id']}: {str(e)}")

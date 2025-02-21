@@ -21,60 +21,29 @@ class DynamoHandler:
             try:
                 # Try to describe the table first
                 dynamodb_client = self.dynamodb.meta.client
-                try:
-                    dynamodb_client.describe_table(TableName=self.table_name)
-                    self.table = self.dynamodb.Table(self.table_name)
-                    self.logger.info(f"Successfully connected to table {self.table_name}")
-                except dynamodb_client.exceptions.ResourceNotFoundException:
-                    # Table doesn't exist, create it
-                    self.logger.info(f"Table {self.table_name} not found, creating...")
-                    self.table = self.dynamodb.create_table(
-                        TableName=self.table_name,
-                        KeySchema=[
-                            {'AttributeName': 'id', 'KeyType': 'HASH'}
-                        ],
-                        AttributeDefinitions=[
-                            {'AttributeName': 'id', 'AttributeType': 'S'}
-                        ],
-                        BillingMode='PAY_PER_REQUEST'
-                    )
-                    self.table.wait_until_exists()
-                    self.logger.info(f"Created table {self.table_name}")
-
-                # Test table access with a simple operation
-                test_item = {
-                    'id': 'permission_test',
-                    'timestamp': int(time.time())
-                }
-                self.table.put_item(Item=test_item)
+                table_desc = dynamodb_client.describe_table(TableName=self.table_name)
+                self.table = self.dynamodb.Table(self.table_name)
                 self.logger.info(f"Successfully connected to table {self.table_name}")
 
             except ClientError as e:
-                error_code = e.response['Error']['Code']
-                error_message = e.response['Error']['Message']
+                if e.response['Error']['Code'] == 'ResourceNotFoundException':
+                    raise Exception(f"Table {self.table_name} not found")
+                raise
 
-                if error_code == 'AccessDeniedException':
-                    self.logger.error(f"""
-Insufficient permissions to access DynamoDB table {self.table_name}
-Required permissions:
-- dynamodb:DescribeTable
-- dynamodb:GetItem
-- dynamodb:PutItem
-- dynamodb:BatchWriteItem
-- dynamodb:Scan
-Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/{self.table_name}
-""")
-                    raise Exception("Insufficient DynamoDB permissions")
-
-                else:
-                    self.logger.error(f"Unexpected DynamoDB error: {error_code} - {error_message}")
-                    raise
+            # Test table access with a simple operation
+            test_item = {
+                'id': 'permission_test',
+                'type': 'test',
+                'timestamp': int(time.time())
+            }
+            self.table.put_item(Item=test_item)
+            self.logger.info(f"Successfully connected to table {self.table_name}")
 
         except Exception as e:
             self.logger.error(f"Failed to ensure table exists: {str(e)}")
             raise
 
-    def store_item(self, item: Dict[str, Any]) -> None:
+    def store_item(self, item: Dict[str, Any], ttl_hours: int = 0) -> None:
         """Store a single item in DynamoDB"""
         if not self.table:
             raise Exception("DynamoDB table not initialized")
@@ -86,6 +55,12 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
 
             # Add timestamp for tracking
             item['timestamp'] = int(time.time())
+            if ttl_hours > 0:
+                item['expiry_time'] = int(time.time()) + (ttl_hours * 3600)
+
+            # Add type if not present (for filtering)
+            if 'type' not in item:
+                item['type'] = 'unknown'
 
             self.table.put_item(
                 Item=item,
@@ -96,125 +71,102 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
             )
 
             duration = time.time() - start_time
-            try:
-                metrics.track_dynamo_operation(
-                    operation='PutItem',
-                    table=self.table_name,
-                    success=True,
-                    duration=duration
-                )
-            except Exception as metric_error:
-                self.logger.warning(f"Failed to track metrics: {str(metric_error)}")
+            metrics.track_dynamo_operation(
+                operation='PutItem',
+                table=self.table_name,
+                success=True,
+                duration=duration
+            )
 
             self.logger.debug(f"Successfully stored item with ID: {item['id']}")
 
         except ClientError as e:
             duration = time.time() - start_time
-            try:
-                metrics.track_dynamo_operation(
-                    operation='PutItem',
-                    table=self.table_name,
-                    success=False,
-                    duration=duration
-                )
-            except Exception as metric_error:
-                self.logger.warning(f"Failed to track metrics: {str(metric_error)}")
+            metrics.track_dynamo_operation(
+                operation='PutItem',
+                table=self.table_name,
+                success=False,
+                duration=duration
+            )
 
             if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
                 self.logger.info(f"Skipping item {item['id']} as a newer version exists")
                 return
 
-            if e.response['Error']['Code'] == 'AccessDeniedException':
-                self.logger.error(f"""
-Failed to write item to DynamoDB table {self.table_name}
-Required permission: dynamodb:PutItem
-Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/{self.table_name}
-""")
-
             self.logger.error(f"DynamoDB operation failed for item {item['id']}: {str(e)}")
             raise
 
-    def batch_store_items(self, items: List[Dict[str, Any]]) -> Tuple[int, List[Dict[str, Any]]]:
+    def batch_store_items(self, items: List[Dict[str, Any]], ttl_hours: int = 0) -> Tuple[int, List[Dict[str, Any]]]:
         """Store multiple items in DynamoDB using batch write"""
         if not self.table:
             raise Exception("DynamoDB table not initialized")
 
-        try:
-            successful_items = 0
-            failed_items = []
+        successful_items = 0
+        failed_items = []
 
-            # Process items in batches of 25 (DynamoDB limit)
-            batch_size = 25
-            for i in range(0, len(items), batch_size):
-                batch_items = items[i:i + batch_size]
-                self.logger.info(f"Processing batch of {len(batch_items)} items")
+        # Process items in batches of 25 (DynamoDB limit)
+        batch_size = 25
+        for i in range(0, len(items), batch_size):
+            batch_items = items[i:i + batch_size]
+            self.logger.info(f"Processing batch of {len(batch_items)} items")
 
-                start_time = time.time()
-                try:
-                    with self.table.batch_writer() as batch:
-                        for item in batch_items:
-                            try:
-                                if 'id' not in item:
-                                    self.logger.warning(f"Skipping item without ID: {item}")
-                                    continue
+            start_time = time.time()
+            try:
+                with self.table.batch_writer() as batch:
+                    for item in batch_items:
+                        try:
+                            if 'id' not in item:
+                                self.logger.warning(f"Skipping item without ID: {item}")
+                                continue
 
-                                item['timestamp'] = int(time.time())
-                                batch.put_item(Item=item)
-                                successful_items += 1
+                            # Add timestamp and TTL
+                            item['timestamp'] = int(time.time())
+                            if ttl_hours > 0:
+                                item['expiry_time'] = int(time.time()) + (ttl_hours * 3600)
 
-                            except Exception as e:
-                                self.logger.error(f"Failed to write item {item.get('id', 'unknown')}: {str(e)}")
-                                failed_items.append({
-                                    'id': item.get('id', 'unknown'),
-                                    'error': str(e),
-                                    'item': item
-                                })
+                            # Add type if not present
+                            if 'type' not in item:
+                                item['type'] = 'unknown'
 
-                    duration = time.time() - start_time
-                    try:
-                        metrics.track_dynamo_operation(
-                            operation='BatchWriteItem',
-                            table=self.table_name,
-                            success=True,
-                            duration=duration
-                        )
-                    except Exception as metric_error:
-                        self.logger.warning(f"Failed to track metrics: {str(metric_error)}")
+                            batch.put_item(Item=item)
+                            successful_items += 1
 
-                except ClientError as e:
-                    duration = time.time() - start_time
-                    try:
-                        metrics.track_dynamo_operation(
-                            operation='BatchWriteItem',
-                            table=self.table_name,
-                            success=False,
-                            duration=duration
-                        )
-                    except Exception as metric_error:
-                        self.logger.warning(f"Failed to track metrics: {str(metric_error)}")
+                        except Exception as e:
+                            self.logger.error(f"Failed to write item {item.get('id', 'unknown')}: {str(e)}")
+                            failed_items.append({
+                                'id': item.get('id', 'unknown'),
+                                'error': str(e),
+                                'item': item
+                            })
 
-                    if e.response['Error']['Code'] == 'AccessDeniedException':
-                        self.logger.error(f"""
-Failed to batch write items to DynamoDB table {self.table_name}
-Required permission: dynamodb:BatchWriteItem
-Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/{self.table_name}
-""")
+                duration = time.time() - start_time
+                metrics.track_dynamo_operation(
+                    operation='BatchWriteItem',
+                    table=self.table_name,
+                    success=True,
+                    duration=duration
+                )
 
-                    error_code = e.response['Error']['Code']
-                    error_msg = e.response['Error']['Message']
-                    self.logger.error(f"Batch write failed - Code: {error_code}, Message: {error_msg}")
-                    failed_items.extend([{
-                        'id': item.get('id', 'unknown'),
-                        'error': error_msg,
-                        'item': item
-                    } for item in batch_items])
+            except ClientError as e:
+                duration = time.time() - start_time
+                metrics.track_dynamo_operation(
+                    operation='BatchWriteItem',
+                    table=self.table_name,
+                    success=False,
+                    duration=duration
+                )
 
-            self.logger.info(f"Batch write completed: {successful_items} items successful, {len(failed_items)} failed")
-            return successful_items, failed_items
+                error_code = e.response['Error']['Code']
+                error_msg = e.response['Error']['Message']
+                self.logger.error(f"Batch write failed - Code: {error_code}, Message: {error_msg}")
+                failed_items.extend([{
+                    'id': item.get('id', 'unknown'),
+                    'error': error_msg,
+                    'item': item
+                } for item in batch_items])
 
-        except Exception as e:
-            self.logger.error(f"Unexpected error in batch_store_items: {str(e)}")
-            raise
+        self.logger.info(f"Batch write completed: {successful_items} items successful, {len(failed_items)} failed")
+        return successful_items, failed_items
 
     def get_item(self, item_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a single item from DynamoDB"""
@@ -269,4 +221,25 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
 
         except ClientError as e:
             self.logger.error(f"DynamoDB scan operation failed for type {item_type} and date range: {str(e)}")
+            raise Exception(f"DynamoDB scan operation failed: {str(e)}")
+
+    def scan_by_congress_and_number(self, congress: int, number: int) -> List[Dict[str, Any]]:
+        """Scan items by congress and number"""
+        try:
+            response = self.table.scan(
+                FilterExpression='congress = :congress AND #number = :number',
+                ExpressionAttributeNames={
+                    '#number': 'number'
+                },
+                ExpressionAttributeValues={
+                    ':congress': congress,
+                    ':number': number
+                }
+            )
+            items = response.get('Items', [])
+            self.logger.info(f"Retrieved {len(items)} items for congress {congress} and number {number}")
+            return items
+
+        except ClientError as e:
+            self.logger.error(f"DynamoDB scan operation failed for congress {congress} and number {number}: {str(e)}")
             raise Exception(f"DynamoDB scan operation failed: {str(e)}")
