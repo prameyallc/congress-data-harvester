@@ -3,6 +3,7 @@ import boto3
 from botocore.exceptions import ClientError
 import logging
 from monitoring import metrics
+from typing import Dict, List, Any, Optional, Tuple
 
 class DynamoHandler:
     def __init__(self, config):
@@ -15,7 +16,6 @@ class DynamoHandler:
     def _ensure_table_exists(self):
         """Ensure DynamoDB table exists and is ready"""
         try:
-            # Check if table exists
             self.logger.info(f"Attempting to access DynamoDB table {self.table_name}")
 
             try:
@@ -34,17 +34,7 @@ class DynamoHandler:
                             {'AttributeName': 'id', 'KeyType': 'HASH'}
                         ],
                         AttributeDefinitions=[
-                            {'AttributeName': 'id', 'AttributeType': 'S'},
-                            {'AttributeName': 'timestamp', 'AttributeType': 'N'}
-                        ],
-                        GlobalSecondaryIndexes=[
-                            {
-                                'IndexName': 'timestamp-index',
-                                'KeySchema': [
-                                    {'AttributeName': 'timestamp', 'KeyType': 'HASH'}
-                                ],
-                                'Projection': {'ProjectionType': 'ALL'}
-                            }
+                            {'AttributeName': 'id', 'AttributeType': 'S'}
                         ],
                         BillingMode='PAY_PER_REQUEST'
                     )
@@ -63,15 +53,7 @@ class DynamoHandler:
                 error_code = e.response['Error']['Code']
                 error_message = e.response['Error']['Message']
 
-                if error_code == 'ResourceNotFoundException':
-                    self.logger.error(f"""
-Table {self.table_name} does not exist. 
-Required permission: dynamodb:CreateTable
-Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/{self.table_name}
-""")
-                    raise Exception(f"Table {self.table_name} does not exist")
-
-                elif error_code == 'AccessDeniedException':
+                if error_code == 'AccessDeniedException':
                     self.logger.error(f"""
 Insufficient permissions to access DynamoDB table {self.table_name}
 Required permissions:
@@ -79,7 +61,7 @@ Required permissions:
 - dynamodb:GetItem
 - dynamodb:PutItem
 - dynamodb:BatchWriteItem
-- dynamodb:Query
+- dynamodb:Scan
 Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/{self.table_name}
 """)
                     raise Exception("Insufficient DynamoDB permissions")
@@ -92,7 +74,7 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
             self.logger.error(f"Failed to ensure table exists: {str(e)}")
             raise
 
-    def store_item(self, item):
+    def store_item(self, item: Dict[str, Any]) -> None:
         """Store a single item in DynamoDB"""
         if not self.table:
             raise Exception("DynamoDB table not initialized")
@@ -102,7 +84,7 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
             if 'id' not in item:
                 raise ValueError("Item must have an 'id' attribute")
 
-            # Add timestamp for the secondary index
+            # Add timestamp for tracking
             item['timestamp'] = int(time.time())
 
             self.table.put_item(
@@ -152,7 +134,7 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
             self.logger.error(f"DynamoDB operation failed for item {item['id']}: {str(e)}")
             raise
 
-    def batch_store_items(self, items):
+    def batch_store_items(self, items: List[Dict[str, Any]]) -> Tuple[int, List[Dict[str, Any]]]:
         """Store multiple items in DynamoDB using batch write"""
         if not self.table:
             raise Exception("DynamoDB table not initialized")
@@ -234,7 +216,7 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
             self.logger.error(f"Unexpected error in batch_store_items: {str(e)}")
             raise
 
-    def get_item(self, item_id):
+    def get_item(self, item_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a single item from DynamoDB"""
         try:
             response = self.table.get_item(
@@ -246,24 +228,45 @@ Resource: arn:aws:dynamodb:{self.dynamodb.meta.client.meta.region_name}:*:table/
             self.logger.error(f"DynamoDB get operation failed for item {item_id}: {str(e)}")
             raise Exception(f"DynamoDB get operation failed: {str(e)}")
 
-    def query_by_date_range(self, start_timestamp, end_timestamp):
-        """Query items within a date range"""
+    def scan_by_type(self, item_type: str) -> List[Dict[str, Any]]:
+        """Scan items by type attribute"""
         try:
-            response = self.table.query(
-                IndexName='timestamp-index',
-                KeyConditionExpression='#ts BETWEEN :start AND :end',
+            response = self.table.scan(
+                FilterExpression='#type = :type',
                 ExpressionAttributeNames={
-                    '#ts': 'timestamp'
+                    '#type': 'type'
                 },
                 ExpressionAttributeValues={
-                    ':start': start_timestamp,
-                    ':end': end_timestamp
+                    ':type': item_type
                 }
             )
             items = response.get('Items', [])
-            self.logger.info(f"Retrieved {len(items)} items for date range {start_timestamp} to {end_timestamp}")
+            self.logger.info(f"Retrieved {len(items)} items of type {item_type}")
             return items
 
         except ClientError as e:
-            self.logger.error(f"DynamoDB query operation failed for range {start_timestamp} to {end_timestamp}: {str(e)}")
-            raise Exception(f"DynamoDB query operation failed: {str(e)}")
+            self.logger.error(f"DynamoDB scan operation failed for type {item_type}: {str(e)}")
+            raise Exception(f"DynamoDB scan operation failed: {str(e)}")
+
+    def scan_by_type_and_date_range(self, item_type: str, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+        """Scan items by type and date range"""
+        try:
+            response = self.table.scan(
+                FilterExpression='#type = :type AND #update_date BETWEEN :start_date AND :end_date',
+                ExpressionAttributeNames={
+                    '#type': 'type',
+                    '#update_date': 'update_date'
+                },
+                ExpressionAttributeValues={
+                    ':type': item_type,
+                    ':start_date': start_date,
+                    ':end_date': end_date
+                }
+            )
+            items = response.get('Items', [])
+            self.logger.info(f"Retrieved {len(items)} items of type {item_type} between {start_date} and {end_date}")
+            return items
+
+        except ClientError as e:
+            self.logger.error(f"DynamoDB scan operation failed for type {item_type} and date range: {str(e)}")
+            raise Exception(f"DynamoDB scan operation failed: {str(e)}")

@@ -7,6 +7,30 @@ from botocore.exceptions import ClientError, WaiterError
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('dynamo_test')
 
+def describe_table(dynamodb, table_name):
+    """Get and log table schema details"""
+    try:
+        response = dynamodb.meta.client.describe_table(TableName=table_name)
+        table_desc = response['Table']
+
+        logger.info("=== Table Schema ===")
+        logger.info(f"Primary Key Schema: {table_desc['KeySchema']}")
+
+        if 'GlobalSecondaryIndexes' in table_desc:
+            logger.info("=== Global Secondary Indexes ===")
+            for gsi in table_desc['GlobalSecondaryIndexes']:
+                logger.info(f"Index: {gsi['IndexName']}")
+                logger.info(f"Key Schema: {gsi['KeySchema']}")
+
+        logger.info("=== Attribute Definitions ===")
+        for attr in table_desc['AttributeDefinitions']:
+            logger.info(f"Attribute: {attr['AttributeName']}, Type: {attr['AttributeType']}")
+
+        return table_desc
+    except Exception as e:
+        logger.error(f"Error describing table: {str(e)}")
+        raise
+
 def wait_for_table_state(dynamodb, table_name, desired_state='ACTIVE', max_retries=10, delay=5):
     """Wait for DynamoDB table to reach desired state"""
     for attempt in range(max_retries):
@@ -20,9 +44,6 @@ def wait_for_table_state(dynamodb, table_name, desired_state='ACTIVE', max_retri
             time.sleep(delay)
         except ClientError as e:
             if e.response['Error']['Code'] == 'ResourceNotFoundException':
-                if desired_state == 'DELETED':
-                    logger.info(f"Table {table_name} is deleted")
-                    return True
                 logger.info(f"Table {table_name} not found")
                 return False
             raise
@@ -35,60 +56,25 @@ def test_dynamo_permissions():
         dynamodb = boto3.resource('dynamodb', region_name='us-west-2')
         table_name = 'prameya-development-dynamodb-table'
 
-        # Test 1: Delete table if exists
+        # Check if table exists and describe its schema
         logger.info("Checking if table exists...")
         try:
             table = dynamodb.Table(table_name)
-            # Wait for any existing operations to complete
-            if not wait_for_table_state(dynamodb, table_name, 'ACTIVE'):
-                logger.warning("Table is not in ACTIVE state, may affect deletion")
+            table_desc = describe_table(dynamodb, table_name)
+            logger.info("Table accessed successfully")
 
-            table.delete()
-            logger.info(f"Initiated deletion of table {table_name}")
-            # Wait for table to be fully deleted
-            if wait_for_table_state(dynamodb, table_name, 'DELETED'):
-                logger.info(f"Successfully deleted table {table_name}")
-            time.sleep(5)  # Additional wait to ensure AWS cleanup
         except ClientError as e:
-            if e.response['Error']['Code'] != 'ResourceNotFoundException':
-                logger.error(f"Error deleting table: {str(e)}")
-                if e.response['Error']['Code'] == 'ResourceInUseException':
-                    logger.info("Table is still being created or modified, proceeding with test")
-                else:
-                    raise
+            logger.error(f"Error accessing table: {str(e)}")
+            return False
 
-        # Test 2: Create table with correct schema
-        logger.info("Creating table with new schema...")
-        table = dynamodb.create_table(
-            TableName=table_name,
-            KeySchema=[
-                {'AttributeName': 'id', 'KeyType': 'HASH'}
-            ],
-            AttributeDefinitions=[
-                {'AttributeName': 'id', 'AttributeType': 'S'},
-                {'AttributeName': 'timestamp', 'AttributeType': 'N'}
-            ],
-            GlobalSecondaryIndexes=[
-                {
-                    'IndexName': 'timestamp-index',
-                    'KeySchema': [
-                        {'AttributeName': 'timestamp', 'KeyType': 'HASH'}
-                    ],
-                    'Projection': {'ProjectionType': 'ALL'}
-                }
-            ],
-            BillingMode='PAY_PER_REQUEST'
-        )
+        # Create test items based on actual schema
+        timestamp = int(time.time())
 
-        # Wait for table to be ready
-        if not wait_for_table_state(dynamodb, table_name, 'ACTIVE'):
-            raise Exception("Table did not become active in the expected timeframe")
-        logger.info("Table created successfully")
-
-        # Test 3: Write test item
-        logger.info("Testing PutItem permission...")
-        test_item = {
-            'id': '117-hr-3076',
+        # Test Bill
+        bill_item = {
+            'id': 'test_117_hr_3076',  # Using underscores to avoid parsing issues
+            'timestamp': timestamp,
+            'type': 'bill',  # Added as regular attribute
             'congress': 117,
             'title': 'Postal Service Reform Act of 2022',
             'update_date': '2022-09-29',
@@ -100,30 +86,56 @@ def test_dynamo_permissions():
             'latest_action': {
                 'text': 'Became Public Law No: 117-108.',
                 'action_date': '2022-04-06'
-            },
-            'update_date_including_text': '2022-09-29T03:27:05Z',
-            'introduced_date': '2022-09-29',
-            'sponsors': [],
-            'committees': [],
-            'url': 'https://api.congress.gov/v3/bill/117/hr/3076?format=json',
-            'timestamp': int(time.time())
+            }
         }
 
-        table.put_item(Item=test_item)
-        logger.info("PutItem succeeded")
-
-        # Test 4: Read the item back
-        logger.info("Testing GetItem permission...")
-        response = table.get_item(Key={'id': '117-hr-3076'})
-        item = response.get('Item')
-
-        if item:
-            logger.info("GetItem succeeded")
-            logger.info(f"Retrieved item: {item}")
-        else:
-            logger.error("GetItem succeeded but no item found")
+        # Write test item
+        logger.info("Testing write operations...")
+        try:
+            table.put_item(Item=bill_item)
+            logger.info(f"Successfully wrote test bill item")
+        except ClientError as e:
+            logger.error(f"Failed to write bill item: {str(e)}")
             return False
 
+        # Read test item
+        logger.info("Testing read operations...")
+        try:
+            response = table.get_item(Key={'id': bill_item['id']})
+            retrieved_item = response.get('Item')
+            if retrieved_item:
+                logger.info(f"Successfully retrieved test bill item")
+                logger.info(f"Retrieved item: {retrieved_item}")
+            else:
+                logger.error(f"Item not found: {bill_item['id']}")
+                return False
+        except ClientError as e:
+            logger.error(f"Failed to read bill item: {str(e)}")
+            return False
+
+        # Test scan by type
+        logger.info("Testing scan operations...")
+        try:
+            response = table.scan(
+                FilterExpression='#type = :type',
+                ExpressionAttributeNames={'#type': 'type'},
+                ExpressionAttributeValues={':type': 'bill'}
+            )
+            items = response.get('Items', [])
+            logger.info(f"Successfully scanned {len(items)} bill items")
+        except ClientError as e:
+            logger.error(f"Scan failed: {str(e)}")
+            return False
+
+        # Clean up test item
+        logger.info("Cleaning up test item...")
+        try:
+            table.delete_item(Key={'id': bill_item['id']})
+            logger.info("Successfully deleted test bill item")
+        except ClientError as e:
+            logger.warning(f"Failed to delete test item {bill_item['id']}: {str(e)}")
+
+        logger.info("All DynamoDB permission tests completed successfully")
         return True
 
     except Exception as e:

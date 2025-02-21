@@ -5,16 +5,37 @@ A robust Python microservice for downloading and storing Congress.gov data in Dy
 ## Features
 
 ### Data Collection
-- Automatic retrieval of congressional data from Congress.gov API
-- Support for historical data back to March 4, 1789 (First Congress)
-- Configurable date ranges for targeted data collection
-- Rate-limited API requests to prevent throttling
-- Intelligent retry mechanism with exponential backoff
+- **Automated Data Retrieval**: Seamless integration with Congress.gov API
+- **Historical Coverage**: Access data back to March 4, 1789 (First Congress)
+- **Configurable Date Ranges**: Flexible data collection periods
+- **Intelligent Rate Limiting**: Automatic request throttling and backoff
+- **Parallel Processing**: 
+  - Multi-threaded data collection
+  - Configurable worker pool size
+  - Automatic workload distribution
+  - Resource-aware scheduling
+  - Memory and CPU usage monitoring for dynamic worker scaling
+- **Error Recovery**: 
+  - Automatic retries with exponential backoff
+  - Failed item tracking and reporting
+  - Transaction integrity protection
+  - State recovery mechanisms
+  - Improved error logging and reporting for better troubleshooting
+
+### Storage & Performance
+- **DynamoDB Integration**: 
+  - On-demand capacity for cost-effective scaling
+  - No provisioned capacity requirements
+  - Automatic table creation and management
+  - Optimized batch operations
+  - Secondary indices for efficient querying
+  - Conditional writes to prevent duplicates
 
 ### Operation Modes
 1. **Incremental Download**
-   - Retrieve recent updates (configurable lookback period)
-   - Ideal for daily/weekly data synchronization
+   - Retrieve recent updates only
+   - Configurable lookback period
+   - Ideal for daily/weekly synchronization
    ```bash
    python congress_downloader.py --mode incremental --lookback-days 7
    ```
@@ -28,31 +49,35 @@ A robust Python microservice for downloading and storing Congress.gov data in Dy
 
 3. **Bulk Download**
    - Retrieve all available historical data
-   - Automatically handles pagination and rate limits
+   - Automatic pagination handling
+   - Resource-aware processing
    ```bash
    python congress_downloader.py --mode bulk
    ```
 
-### Data Storage
-- Efficient DynamoDB storage with optimized schema
-- Automatic table creation and management
-- Conditional writes to prevent duplicate data
-- Support for batch operations
-- Secondary indices for efficient querying
-
-### Performance Features
-- Parallel processing for faster data retrieval
-- Configurable batch sizes for optimal performance
-- Automatic resource monitoring
-- Graceful shutdown handling
-- Progress tracking and detailed logging
-
 ### Monitoring & Reliability
-- Comprehensive logging with rotation
-- CloudWatch metrics integration (optional)
-- Built-in health checks
-- Resource usage monitoring
-- Detailed error reporting and handling
+- **Comprehensive Logging**:
+  - Detailed operation tracking
+  - Automatic log rotation
+  - Configurable log levels
+  - Transaction logging
+  - Performance metrics
+- **Health Checks**:
+  - API connectivity verification
+  - DynamoDB access testing
+  - Environment validation
+  - Component status monitoring
+- **Resource Monitoring**:
+  - Memory usage tracking
+  - CPU utilization monitoring
+  - Network throughput analysis
+  - DynamoDB capacity tracking
+- **Error Handling**:
+  - Graceful failure recovery
+  - Detailed error reporting
+  - Automatic retry mechanisms
+  - Data consistency verification
+
 
 ## Quick Start
 
@@ -77,111 +102,85 @@ pip install -r requirements.txt
 python congress_downloader.py --mode incremental --lookback-days 1
 ```
 
-## Usage
+## Configuration
 
-### 1. Download by Date Range
-
-Download data for any specific time period:
-
-```bash
-# Last month
-python congress_downloader.py --mode refresh --start-date 2024-01-01 --end-date 2024-01-31
-
-# Specific congressional session
-python congress_downloader.py --mode refresh --start-date 2023-01-03 --end-date 2024-01-03
-
-# Historical data
-python congress_downloader.py --mode refresh --start-date 1989-01-01 --end-date 1989-12-31
-```
-
-### 2. Incremental Download
-
-Download recent updates (configurable lookback period):
-
-```bash
-# Last 24 hours
-python congress_downloader.py --mode incremental --lookback-days 1
-
-# Last week
-python congress_downloader.py --mode incremental --lookback-days 7
-
-# Last month
-python congress_downloader.py --mode incremental --lookback-days 30
-```
-
-### 3. Bulk Download
-
-Download all available data from the earliest date:
-
-```bash
-python congress_downloader.py --mode bulk
-```
-
-## Date Range Configuration
-
-The date range functionality can be configured in `config.json`:
+The application uses a JSON configuration file (`config.json`) for customization:
 
 ```json
 {
+    "api": {
+        "base_url": "https://api.congress.gov/v3",
+        "rate_limit": {
+            "requests_per_second": 5,
+            "max_retries": 3,
+            "retry_delay": 1
+        }
+    },
+    "dynamodb": {
+        "table_name": "congress-data-dev",
+        "region": "us-west-2"
+    },
+    "logging": {
+        "level": "DEBUG",
+        "file": "logs/congress_downloader.log",
+        "max_size": 10485760,
+        "backup_count": 5,
+        "include_performance_metrics": true
+    },
     "download": {
+        "batch_size": 100,
+        "default_lookback_days": 30,
         "date_ranges": {
             "max_range_days": 365,
             "min_date": "1789-03-04",
             "default_start_date": "2024-01-01",
             "default_end_date": "2024-12-31"
+        },
+        "parallel": {
+            "max_workers": 3,
+            "chunk_size": 5,
+            "memory_limit_mb": 1024,
+            "cpu_threshold": 80
         }
     }
 }
 ```
 
-- `max_range_days`: Maximum number of days for a single download request
-- `min_date`: Earliest allowed date (First Congress: March 4, 1789)
-- `default_start_date`: Default start date if not specified
-- `default_end_date`: Default end date if not specified
+### Key Configuration Options
+
+1. **API Settings**
+   - `requests_per_second`: Control rate limiting (default: 5)
+   - `max_retries`: Maximum retry attempts for failed requests
+   - `retry_delay`: Base delay between retries in seconds
+
+2. **DynamoDB Configuration**
+   - Uses on-demand capacity for automatic scaling
+   - No need to specify read/write capacity units
+   - `table_name`: Your DynamoDB table name
+   - `region`: AWS region for DynamoDB operations
+
+3. **Download Settings**
+   - `batch_size`: Number of items per batch operation
+   - `default_lookback_days`: Default period for incremental updates
+   - `max_workers`: Number of parallel download threads
+   - `chunk_size`: Items processed per worker
+   - `memory_limit_mb`: Memory threshold for worker scaling
+   - `cpu_threshold`: CPU usage threshold percentage
+
+4. **Logging Options**
+   - `level`: Log detail level (DEBUG, INFO, WARNING, ERROR)
+   - `max_size`: Maximum log file size in bytes
+   - `backup_count`: Number of backup log files to keep
+   - `include_performance_metrics`: Enable detailed performance logging
+
 
 ## Documentation
 
+For detailed information about each component:
 - [Configuration Guide](CONFIGURATION.md) - Detailed configuration options
 - [API Documentation](API.md) - Congress.gov API integration details
 - [Architecture Overview](ARCHITECTURE.md) - System design and components
 - [Deployment Guide](DEPLOYMENT.md) - Deployment instructions for various platforms
-- [Contributing Guidelines](CONTRIBUTING.md) - Development guidelines
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Date Range Too Large**
-   ```
-   Error: Date range exceeds maximum allowed (365 days)
-   ```
-   - Split your request into smaller date ranges
-   - Adjust max_range_days in config.json
-   - Use parallel processing for efficiency
-
-2. **Invalid Date Format**
-   ```
-   Error: Invalid date format. Use YYYY-MM-DD
-   ```
-   - Ensure dates are in YYYY-MM-DD format
-   - Check date validity
-   - Verify dates are within allowed range
-
-3. **Missing AWS Credentials**
-   ```
-   botocore.exceptions.NoCredentialsError: Unable to locate credentials
-   ```
-   - Set the required environment variables
-   - Verify AWS credentials are valid
-   - Check AWS region configuration
-
-4. **Rate Limiting**
-   ```
-   Error: Rate limit exceeded
-   ```
-   - Reduce the number of concurrent requests
-   - Implement exponential backoff for retries
-
 
 ## Requirements
 

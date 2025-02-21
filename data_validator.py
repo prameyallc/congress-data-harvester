@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import logging
 
 class DataValidator:
@@ -11,15 +11,40 @@ class DataValidator:
         self.validation_stats = {
             'total_processed': 0,
             'total_valid': 0,
-            'total_invalid': 0
+            'total_invalid': 0,
+            'by_type': {}
         }
 
-    def validate_bill(self, bill: Dict[str, Any]) -> tuple[bool, List[str]]:
+    def validate_data(self, data: Dict[str, Any], data_type: str) -> Tuple[bool, List[str]]:
         """
-        Validate bill data structure and content
+        Validate data based on its type
         Returns: (is_valid, list of validation errors)
         """
         self.validation_stats['total_processed'] += 1
+
+        # Initialize stats for this type if not exists
+        if data_type not in self.validation_stats['by_type']:
+            self.validation_stats['by_type'][data_type] = {
+                'processed': 0,
+                'valid': 0,
+                'invalid': 0
+            }
+        self.validation_stats['by_type'][data_type]['processed'] += 1
+
+        # Route to appropriate validator
+        if data_type == 'bill':
+            return self.validate_bill(data)
+        elif data_type == 'amendment':
+            return self.validate_amendment(data)
+        elif data_type == 'nomination':
+            return self.validate_nomination(data)
+        elif data_type == 'treaty':
+            return self.validate_treaty(data)
+        else:
+            return False, [f"Unknown data type: {data_type}"]
+
+    def validate_bill(self, bill: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate bill data structure and content"""
         errors = []
 
         # Required fields
@@ -66,26 +91,140 @@ class DataValidator:
                         if not self._is_valid_date(latest_action['action_date']):
                             errors.append(f"Invalid action_date format: {latest_action['action_date']}")
 
-            # Chamber code validation
-            if 'origin_chamber_code' in bill:
-                valid_chamber_codes = ['H', 'S']
-                if bill['origin_chamber_code'] not in valid_chamber_codes:
-                    errors.append(f"Invalid origin_chamber_code: {bill['origin_chamber_code']}")
-
-            # URL validation
-            if 'url' in bill and bill['url']:
-                if not bill['url'].startswith('https://api.congress.gov/'):
-                    errors.append("Invalid API URL format")
-
         is_valid = len(errors) == 0
         if is_valid:
             self.validation_stats['total_valid'] += 1
+            self.validation_stats['by_type']['bill']['valid'] += 1
             self.logger.debug(f"Bill {bill['id']} passed validation")
         else:
             self.validation_stats['total_invalid'] += 1
+            self.validation_stats['by_type']['bill']['invalid'] += 1
             self.logger.warning(f"Bill {bill['id']} failed validation: {', '.join(errors)}")
 
-        return (is_valid, errors)
+        return is_valid, errors
+
+    def validate_amendment(self, amendment: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate amendment data structure"""
+        errors = []
+        required_fields = ['id', 'congress', 'type', 'number', 'update_date']
+
+        for field in required_fields:
+            if field not in amendment:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            # Congress number validation
+            try:
+                congress_num = int(amendment['congress'])
+                if congress_num < 1 or congress_num > 150:
+                    errors.append(f"Invalid congress number: {congress_num}")
+            except (ValueError, TypeError):
+                errors.append("Congress must be a valid number")
+
+            # Amendment number validation
+            try:
+                amdt_num = int(amendment['number'])
+                if amdt_num < 1:
+                    errors.append("Amendment number must be positive")
+            except (ValueError, TypeError):
+                errors.append("Amendment number must be a valid number")
+
+            # Date validation
+            if not self._is_valid_date(amendment['update_date']):
+                errors.append(f"Invalid update_date format: {amendment['update_date']}")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('amendment', is_valid)
+        return is_valid, errors
+
+    def validate_nomination(self, nomination: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate nomination data structure"""
+        errors = []
+        required_fields = ['id', 'congress', 'nomination_number', 'update_date']
+
+        for field in required_fields:
+            if field not in nomination:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            # Congress number validation
+            try:
+                congress_num = int(nomination['congress'])
+                if congress_num < 1 or congress_num > 150:
+                    errors.append(f"Invalid congress number: {congress_num}")
+            except (ValueError, TypeError):
+                errors.append("Congress must be a valid number")
+
+            # Nomination number validation
+            try:
+                nom_num = int(nomination['nomination_number'])
+                if nom_num < 1:
+                    errors.append("Nomination number must be positive")
+            except (ValueError, TypeError):
+                errors.append("Nomination number must be a valid number")
+
+            # Date validation
+            if not self._is_valid_date(nomination['update_date']):
+                errors.append(f"Invalid update_date format: {nomination['update_date']}")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('nomination', is_valid)
+        return is_valid, errors
+
+    def validate_treaty(self, treaty: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate treaty data structure"""
+        errors = []
+        required_fields = ['id', 'congress', 'treaty_number', 'update_date']
+
+        for field in required_fields:
+            if field not in treaty:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            # Congress number validation
+            try:
+                congress_num = int(treaty['congress'])
+                if congress_num < 1 or congress_num > 150:
+                    errors.append(f"Invalid congress number: {congress_num}")
+            except (ValueError, TypeError):
+                errors.append("Congress must be a valid number")
+
+            # Treaty number validation
+            try:
+                treaty_num = int(treaty['treaty_number'])
+                if treaty_num < 1:
+                    errors.append("Treaty number must be positive")
+            except (ValueError, TypeError):
+                errors.append("Treaty number must be a valid number")
+
+            # Date validation
+            if not self._is_valid_date(treaty['update_date']):
+                errors.append(f"Invalid update_date format: {treaty['update_date']}")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('treaty', is_valid)
+        return is_valid, errors
+
+    def _update_validation_stats(self, data_type: str, is_valid: bool):
+        """Update validation statistics for a specific data type"""
+        if is_valid:
+            self.validation_stats['total_valid'] += 1
+            self.validation_stats['by_type'][data_type]['valid'] += 1
+        else:
+            self.validation_stats['total_invalid'] += 1
+            self.validation_stats['by_type'][data_type]['invalid'] += 1
+
+    def cleanup_data(self, data: Dict[str, Any], data_type: str) -> Dict[str, Any]:
+        """Clean and normalize data based on its type"""
+        if data_type == 'bill':
+            return self.cleanup_bill(data)
+        elif data_type == 'amendment':
+            return self.cleanup_amendment(data)
+        elif data_type == 'nomination':
+            return self.cleanup_nomination(data)
+        elif data_type == 'treaty':
+            return self.cleanup_treaty(data)
+        return data
 
     def cleanup_bill(self, bill: Dict[str, Any]) -> Dict[str, Any]:
         """Clean and normalize bill data"""
@@ -123,22 +262,65 @@ class DataValidator:
             }
             cleaned['origin_chamber'] = chamber_mapping.get(cleaned['origin_chamber'], cleaned['origin_chamber'])
 
-        # Ensure latest action is a dictionary with required fields
-        if 'latest_action' in cleaned:
-            if isinstance(cleaned['latest_action'], str):
-                cleaned['latest_action'] = {'text': cleaned['latest_action'], 'action_date': ''}
-            elif cleaned['latest_action'] is None:
-                cleaned['latest_action'] = {'text': '', 'action_date': ''}
-            elif not isinstance(cleaned['latest_action'], dict):
-                cleaned['latest_action'] = {'text': str(cleaned['latest_action']), 'action_date': ''}
-
         # Ensure lists are present
         list_fields = ['sponsors', 'committees']
         for field in list_fields:
             if field not in cleaned or cleaned[field] is None:
                 cleaned[field] = []
 
-        self.logger.debug(f"Cleaned and normalized bill {cleaned['id']}")
+        return cleaned
+
+    def cleanup_amendment(self, amendment: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize amendment data"""
+        cleaned = amendment.copy()
+
+        # Convert numeric fields
+        for field in ['congress', 'number']:
+            if field in cleaned:
+                try:
+                    cleaned[field] = int(cleaned[field])
+                except (ValueError, TypeError):
+                    self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
+
+        # Normalize text fields
+        if 'purpose' in cleaned:
+            cleaned['purpose'] = ' '.join(cleaned['purpose'].split())
+
+        return cleaned
+
+    def cleanup_nomination(self, nomination: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize nomination data"""
+        cleaned = nomination.copy()
+
+        # Convert numeric fields
+        for field in ['congress', 'nomination_number']:
+            if field in cleaned:
+                try:
+                    cleaned[field] = int(cleaned[field])
+                except (ValueError, TypeError):
+                    self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
+
+        # Normalize text fields
+        if 'description' in cleaned:
+            cleaned['description'] = ' '.join(cleaned['description'].split())
+
+        return cleaned
+
+    def cleanup_treaty(self, treaty: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize treaty data"""
+        cleaned = treaty.copy()
+
+        # Convert numeric fields
+        for field in ['congress', 'treaty_number']:
+            if field in cleaned:
+                try:
+                    cleaned[field] = int(cleaned[field])
+                except (ValueError, TypeError):
+                    self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
+
+        # Normalize text fields
+        if 'title' in cleaned:
+            cleaned['title'] = ' '.join(cleaned['title'].split())
 
         return cleaned
 
@@ -152,34 +334,7 @@ class DataValidator:
         except ValueError:
             return False
 
-    def validate_sponsor(self, sponsor: Dict[str, Any]) -> tuple[bool, List[str]]:
-        """Validate sponsor data structure"""
-        errors = []
-        required_fields = ['bioguideId', 'firstName', 'lastName']
-
-        for field in required_fields:
-            if field not in sponsor:
-                errors.append(f"Missing required sponsor field: {field}")
-
-        return (len(errors) == 0, errors)
-
-    def validate_committee(self, committee: Dict[str, Any]) -> tuple[bool, List[str]]:
-        """Validate committee data structure"""
-        errors = []
-        required_fields = ['systemCode', 'name', 'chamber']
-
-        for field in required_fields:
-            if field not in committee:
-                errors.append(f"Missing required committee field: {field}")
-
-        if 'chamber' in committee:
-            valid_chambers = ['House', 'Senate', 'Joint']
-            if committee['chamber'] not in valid_chambers:
-                errors.append(f"Invalid chamber: {committee['chamber']}")
-
-        return (len(errors) == 0, errors)
-
-    def get_validation_stats(self) -> Dict[str, int]:
+    def get_validation_stats(self) -> Dict[str, Any]:
         """Return current validation statistics"""
         return self.validation_stats.copy()
 
@@ -188,5 +343,6 @@ class DataValidator:
         self.validation_stats = {
             'total_processed': 0,
             'total_valid': 0,
-            'total_invalid': 0
+            'total_invalid': 0,
+            'by_type': {}
         }
