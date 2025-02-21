@@ -22,6 +22,18 @@ class DynamoHandler:
                 # Try to describe the table first
                 dynamodb_client = self.dynamodb.meta.client
                 table_desc = dynamodb_client.describe_table(TableName=self.table_name)
+
+                # Check if the required index exists
+                indexes = table_desc['Table'].get('GlobalSecondaryIndexes', [])
+                required_index = 'type-update_date-index'
+
+                if not any(idx['IndexName'] == required_index for idx in indexes):
+                    self.logger.warning(f"Table {self.table_name} exists but missing required index {required_index}")
+                    # Instead of deleting and recreating, just use existing table
+                    self.table = self.dynamodb.Table(self.table_name)
+                    self.logger.info(f"Using existing table without index {required_index}")
+                    return
+
                 self.table = self.dynamodb.Table(self.table_name)
                 self.logger.info(f"Successfully connected to table {self.table_name}")
                 return
@@ -31,7 +43,6 @@ class DynamoHandler:
                     self._create_table_with_indexes()
                 else:
                     raise
-
         except Exception as e:
             self.logger.error(f"Failed to ensure table exists: {str(e)}")
             raise
@@ -108,28 +119,52 @@ class DynamoHandler:
             raise
 
     def query_by_type_and_date_range(self, item_type: str, start_date: str, end_date: str) -> List[Dict[str, Any]]:
-        """Query items by type and date range using GSI"""
+        """Query items by type and date range using GSI or fallback to scan"""
         try:
-            response = self.table.query(
-                IndexName='type-update_date-index',
-                KeyConditionExpression='#type = :type AND #update_date BETWEEN :start_date AND :end_date',
-                ExpressionAttributeNames={
-                    '#type': 'type',
-                    '#update_date': 'update_date'
-                },
-                ExpressionAttributeValues={
-                    ':type': item_type,
-                    ':start_date': start_date,
-                    ':end_date': end_date
-                }
-            )
-            items = response.get('Items', [])
-            self.logger.info(f"Retrieved {len(items)} items of type {item_type} between {start_date} and {end_date}")
-            return items
+            # First try using the GSI if it exists
+            try:
+                response = self.table.query(
+                    IndexName='type-update_date-index',
+                    KeyConditionExpression='#type = :type AND #update_date BETWEEN :start_date AND :end_date',
+                    ExpressionAttributeNames={
+                        '#type': 'type',
+                        '#update_date': 'update_date'
+                    },
+                    ExpressionAttributeValues={
+                        ':type': item_type,
+                        ':start_date': start_date,
+                        ':end_date': end_date
+                    }
+                )
+                items = response.get('Items', [])
+                self.logger.info(f"Retrieved {len(items)} items of type {item_type} between {start_date} and {end_date} using GSI")
+                return items
+
+            except ClientError as e:
+                if 'ValidationException' in str(e) and 'index' in str(e):
+                    # Index doesn't exist, fall back to scan with filter
+                    self.logger.warning(f"Index not available, falling back to scan operation for type {item_type}")
+                    response = self.table.scan(
+                        FilterExpression='#type = :type AND #update_date BETWEEN :start_date AND :end_date',
+                        ExpressionAttributeNames={
+                            '#type': 'type',
+                            '#update_date': 'update_date'
+                        },
+                        ExpressionAttributeValues={
+                            ':type': item_type,
+                            ':start_date': start_date,
+                            ':end_date': end_date
+                        }
+                    )
+                    items = response.get('Items', [])
+                    self.logger.info(f"Retrieved {len(items)} items of type {item_type} between {start_date} and {end_date} using scan")
+                    return items
+                else:
+                    raise
 
         except ClientError as e:
-            self.logger.error(f"DynamoDB query operation failed: {str(e)}")
-            raise Exception(f"DynamoDB query operation failed: {str(e)}")
+            self.logger.error(f"DynamoDB operation failed: {str(e)}")
+            raise Exception(f"DynamoDB operation failed: {str(e)}")
 
     def query_by_congress_and_number(self, congress: int, number: int) -> List[Dict[str, Any]]:
         """Query items by congress and number using GSI"""

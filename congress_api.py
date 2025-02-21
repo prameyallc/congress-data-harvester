@@ -125,7 +125,6 @@ class CongressBaseAPI:
     def get_available_endpoints(self) -> Dict[str, Any]:
         """Get list of available API endpoints and their details"""
         try:
-            # Query standard endpoints we know about
             standard_endpoints = [
                 'bill', 'amendment', 'nomination', 'treaty',
                 'committee', 'hearing', 'committee-report',
@@ -138,7 +137,6 @@ class CongressBaseAPI:
             for endpoint in standard_endpoints:
                 try:
                     self.logger.info(f"Checking endpoint: {endpoint}")
-                    # Use minimal parameters to test endpoint
                     response = self._make_request(endpoint, {
                         'limit': 1,
                         'format': 'json',
@@ -146,7 +144,6 @@ class CongressBaseAPI:
                     })
 
                     if response:
-                        # If endpoint responds successfully, add it to available endpoints
                         available_endpoints[endpoint] = {
                             'name': endpoint,
                             'url': f"{self.base_url}/{endpoint}",
@@ -154,12 +151,6 @@ class CongressBaseAPI:
                             'response_keys': list(response.keys()) if isinstance(response, dict) else []
                         }
                         self.logger.info(f"Found active endpoint: {endpoint}")
-                except requests.exceptions.Timeout as e:
-                    self.logger.warning(f"Endpoint {endpoint} timed out: {str(e)}")
-                    continue
-                except requests.exceptions.RequestException as e:
-                    self.logger.warning(f"Endpoint {endpoint} request failed: {str(e)}")
-                    continue
                 except Exception as e:
                     self.logger.warning(f"Endpoint {endpoint} error: {str(e)}")
                     continue
@@ -172,23 +163,6 @@ class CongressBaseAPI:
         except Exception as e:
             self.logger.error(f"Failed to get available endpoints: {str(e)}")
             raise
-
-    def _rate_limit_wait(self):
-        """Implement rate limiting with jitter"""
-        current_time = time.time()
-        time_since_last_request = current_time - self.last_request_time
-        base_wait = 1.0 / self.rate_limit['requests_per_second']
-        jitter = uniform(-0.1 * base_wait, 0.1 * base_wait)
-        wait_time = base_wait + jitter
-        if self.consecutive_errors > 0:
-            backoff_multiplier = min(2 ** self.consecutive_errors, 60)
-            wait_time *= backoff_multiplier
-            self.logger.warning(f"Rate limit backoff: waiting {wait_time:.2f} seconds after {self.consecutive_errors} consecutive errors")
-        if time_since_last_request < wait_time:
-            sleep_time = wait_time - time_since_last_request
-            self.logger.debug(f"Rate limiting: waiting {sleep_time:.2f} seconds")
-            time.sleep(sleep_time)
-        self.last_request_time = time.time()
 
     def get_current_congress(self) -> int:
         """Get the current Congress number"""
@@ -338,12 +312,32 @@ class CongressAPI(CongressBaseAPI):
                 self.logger.warning(f"Received string instead of dictionary for committee: {committee}")
                 return None
 
-            # Ensure required fields exist
-            if not all(key in committee for key in ['congress', 'chamber', 'type', 'name']):
-                self.logger.warning(f"Committee missing required fields: {committee}")
-                return None
+            # Extract committee details from the response structure
+            committee_details = committee.get('committee', committee)
+            if isinstance(committee_details, dict):
+                committee_type = committee_details.get('type', committee_details.get('committeeTypeCode', '')).lower()
+                chamber = committee_details.get('chamber', {})
+                chamber_code = chamber.get('code', '') if isinstance(chamber, dict) else chamber
+                chamber_name = chamber_code.title() if isinstance(chamber_code, str) else ''
+                name = committee_details.get('name', '')
+            else:
+                # If committee_details is not a dict, use the original committee object
+                committee_type = committee.get('type', committee.get('committeeTypeCode', '')).lower()
+                chamber = committee.get('chamber', {})
+                chamber_code = chamber.get('code', '') if isinstance(chamber, dict) else chamber
+                chamber_name = chamber_code.title() if isinstance(chamber_code, str) else ''
+                name = committee.get('name', '')
 
-            committee_id = self._generate_committee_id(committee)
+            # Prepare data for ID generation
+            committee_data = {
+                'congress': current_congress,
+                'chamber': {'code': chamber_code},
+                'type': committee_type,
+                'name': name
+            }
+            
+            committee_id = self._generate_committee_id(committee_data)
+            
             if not committee_id:
                 self.logger.warning("Unable to generate ID for committee")
                 return None
@@ -351,14 +345,18 @@ class CongressAPI(CongressBaseAPI):
             transformed_committee = {
                 'id': committee_id,
                 'type': 'committee',
-                'congress': committee.get('congress', current_congress),
+                'congress': current_congress,
                 'update_date': committee.get('updateDate', ''),
                 'version': 1,
-                'name': committee.get('name', ''),
-                'chamber': committee.get('chamber', {}).get('name', ''),
-                'committee_type': committee.get('type', ''),
-                'subcommittees': committee.get('subcommittees', []),
-                'parent_committee': committee.get('parentCommittee', {}),
+                'name': name,
+                'chamber': chamber_name,
+                'committee_type': committee_type,
+                'system_code': committee.get('systemCode', ''),
+                'parent_committee': {
+                    'name': committee.get('parent', {}).get('name', ''),
+                    'system_code': committee.get('parent', {}).get('systemCode', ''),
+                    'url': committee.get('parent', {}).get('url', '')
+                } if committee.get('parent') else {},
                 'url': committee.get('url', '')
             }
 
@@ -409,7 +407,32 @@ class CongressAPI(CongressBaseAPI):
     def _process_hearing(self, hearing: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a hearing"""
         try:
-            hearing_id = self._generate_hearing_id(hearing)
+            # Extract and validate required fields from the hearing response structure
+            hearing_details = hearing.get('hearing', hearing)
+            
+            if isinstance(hearing_details, dict):
+                committee = hearing_details.get('committee', '')
+                hearing_date = hearing_details.get('date', '')
+                chamber = hearing_details.get('chamber', {})
+                hearing_type = hearing_details.get('type', '')
+                title = hearing_details.get('title', '')
+            else:
+                committee = hearing.get('committee', '')
+                hearing_date = hearing.get('date', '')
+                chamber = hearing.get('chamber', {})
+                hearing_type = hearing.get('type', '')
+                title = hearing.get('title', '')
+
+            if not committee or not hearing_date:
+                self.logger.warning(f"Missing required fields for hearing ID generation: committee={committee}, date={hearing_date}")
+                return None
+
+            hearing_id = self._generate_hearing_id({
+                'congress': current_congress,
+                'date': hearing_date,
+                'committee': committee
+            })
+
             if not hearing_id:
                 self.logger.warning("Unable to generate ID for hearing")
                 return None
@@ -417,15 +440,15 @@ class CongressAPI(CongressBaseAPI):
             transformed_hearing = {
                 'id': hearing_id,
                 'type': 'hearing',
-                'congress': hearing.get('congress', current_congress),
+                'congress': current_congress,
                 'update_date': hearing.get('updateDate', ''),
                 'version': 1,
-                'chamber': hearing.get('chamber', {}).get('name', ''),
-                'committee': hearing.get('committee', ''),
+                'chamber': chamber.get('name', '') if isinstance(chamber, dict) else '',
+                'committee': committee,
                 'subcommittee': hearing.get('subcommittee', ''),
-                'hearing_type': hearing.get('type', ''),
-                'title': hearing.get('title', ''),
-                'date': hearing.get('date', ''),
+                'hearing_type': hearing_type,
+                'title': title,
+                'date': hearing_date,
                 'time': hearing.get('time', ''),
                 'location': hearing.get('location', ''),
                 'description': hearing.get('description', ''),
@@ -447,14 +470,26 @@ class CongressAPI(CongressBaseAPI):
     def _generate_hearing_id(self, hearing: Dict) -> Optional[str]:
         """Generate a hearing ID from hearing data"""
         try:
+            if not isinstance(hearing, dict):
+                self.logger.error(f"Hearing data must be a dictionary, got {type(hearing)}")
+                return None
+
             congress = str(hearing.get('congress', ''))
             date = hearing.get('date', '').replace('-', '')
             committee = re.sub(r'[^a-zA-Z0-9]', '', hearing.get('committee', ''))[:20]
-            if congress and date and committee:
-                return f"{congress}-hear-{date}-{committee}"
+
+            if not all([congress, date, committee]):
+                self.logger.warning(
+                    f"Missing required fields for hearing ID generation: "
+                    f"congress={congress}, date={date}, committee={committee}"
+                )
+                return None
+
+            return f"{congress}-hear-{date}-{committee}"
+
         except Exception as e:
             self.logger.error(f"Failed to generate hearing ID: {str(e)}")
-        return None
+            return None
 
     def _process_house_requirement(self, req: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a house requirement"""
