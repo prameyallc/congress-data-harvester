@@ -151,7 +151,7 @@ def main():
 
     logger.info("Starting health checks...")
 
-    # Include endpoint check in health status
+    # Initialize health status without overall
     health_status = {
         'environment': check_environment(),
         'aws_credentials': check_aws_credentials(),
@@ -160,13 +160,15 @@ def main():
         'dynamodb': check_dynamodb(config)
     }
 
-    # Overall status is healthy only if all components are healthy
+    # Calculate overall status separately
+    all_healthy = all(
+        component['status'] == 'healthy'
+        for component in health_status.values()
+    )
+
+    # Add overall status
     health_status['overall'] = {
-        'status': 'healthy' if all(
-            component['status'] == 'healthy'
-            for component in health_status.values()
-            if component != health_status['overall']  # Skip comparing with itself
-        ) else 'unhealthy'
+        'status': 'healthy' if all_healthy else 'unhealthy'
     }
 
     print(json.dumps(health_status, indent=2))

@@ -14,7 +14,7 @@ class DynamoHandler:
         self._ensure_table_exists()
 
     def _ensure_table_exists(self):
-        """Ensure DynamoDB table exists and is ready"""
+        """Ensure DynamoDB table exists and is ready with optimized indexes"""
         try:
             self.logger.info(f"Attempting to access DynamoDB table {self.table_name}")
 
@@ -24,24 +24,134 @@ class DynamoHandler:
                 table_desc = dynamodb_client.describe_table(TableName=self.table_name)
                 self.table = self.dynamodb.Table(self.table_name)
                 self.logger.info(f"Successfully connected to table {self.table_name}")
+                return
 
             except ClientError as e:
                 if e.response['Error']['Code'] == 'ResourceNotFoundException':
-                    raise Exception(f"Table {self.table_name} not found")
-                raise
-
-            # Test table access with a simple operation
-            test_item = {
-                'id': 'permission_test',
-                'type': 'test',
-                'timestamp': int(time.time())
-            }
-            self.table.put_item(Item=test_item)
-            self.logger.info(f"Successfully connected to table {self.table_name}")
+                    self._create_table_with_indexes()
+                else:
+                    raise
 
         except Exception as e:
             self.logger.error(f"Failed to ensure table exists: {str(e)}")
             raise
+
+    def _create_table_with_indexes(self):
+        """Create table with optimized indexes for Congress.gov data"""
+        try:
+            self.logger.info("Creating new table with optimized indexes...")
+
+            # Create the table with GSIs and LSIs
+            table = self.dynamodb.create_table(
+                TableName=self.table_name,
+                KeySchema=[
+                    {'AttributeName': 'id', 'KeyType': 'HASH'},  # Partition key
+                    {'AttributeName': 'update_date', 'KeyType': 'RANGE'}  # Sort key
+                ],
+                AttributeDefinitions=[
+                    {'AttributeName': 'id', 'AttributeType': 'S'},
+                    {'AttributeName': 'update_date', 'AttributeType': 'S'},
+                    {'AttributeName': 'type', 'AttributeType': 'S'},
+                    {'AttributeName': 'congress', 'AttributeType': 'N'},
+                    {'AttributeName': 'number', 'AttributeType': 'N'}
+                ],
+                GlobalSecondaryIndexes=[
+                    # GSI for querying by type and update date
+                    {
+                        'IndexName': 'type-update_date-index',
+                        'KeySchema': [
+                            {'AttributeName': 'type', 'KeyType': 'HASH'},
+                            {'AttributeName': 'update_date', 'KeyType': 'RANGE'}
+                        ],
+                        'Projection': {'ProjectionType': 'ALL'},
+                        'ProvisionedThroughput': {
+                            'ReadCapacityUnits': 5,
+                            'WriteCapacityUnits': 5
+                        }
+                    },
+                    # GSI for querying by congress
+                    {
+                        'IndexName': 'congress-number-index',
+                        'KeySchema': [
+                            {'AttributeName': 'congress', 'KeyType': 'HASH'},
+                            {'AttributeName': 'number', 'KeyType': 'RANGE'}
+                        ],
+                        'Projection': {'ProjectionType': 'ALL'},
+                        'ProvisionedThroughput': {
+                            'ReadCapacityUnits': 5,
+                            'WriteCapacityUnits': 5
+                        }
+                    }
+                ],
+                BillingMode='PROVISIONED',
+                ProvisionedThroughput={
+                    'ReadCapacityUnits': 5,
+                    'WriteCapacityUnits': 5
+                },
+                StreamSpecification={
+                    'StreamEnabled': True,
+                    'StreamViewType': 'NEW_AND_OLD_IMAGES'
+                },
+                TimeToLiveSpecification={
+                    'Enabled': True,
+                    'AttributeName': 'expiry_time'
+                }
+            )
+
+            self.logger.info("Waiting for table creation...")
+            table.wait_until_exists()
+            self.table = table
+            self.logger.info(f"Table {self.table_name} created successfully with optimized indexes")
+
+        except Exception as e:
+            self.logger.error(f"Failed to create table: {str(e)}")
+            raise
+
+    def query_by_type_and_date_range(self, item_type: str, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+        """Query items by type and date range using GSI"""
+        try:
+            response = self.table.query(
+                IndexName='type-update_date-index',
+                KeyConditionExpression='#type = :type AND #update_date BETWEEN :start_date AND :end_date',
+                ExpressionAttributeNames={
+                    '#type': 'type',
+                    '#update_date': 'update_date'
+                },
+                ExpressionAttributeValues={
+                    ':type': item_type,
+                    ':start_date': start_date,
+                    ':end_date': end_date
+                }
+            )
+            items = response.get('Items', [])
+            self.logger.info(f"Retrieved {len(items)} items of type {item_type} between {start_date} and {end_date}")
+            return items
+
+        except ClientError as e:
+            self.logger.error(f"DynamoDB query operation failed: {str(e)}")
+            raise Exception(f"DynamoDB query operation failed: {str(e)}")
+
+    def query_by_congress_and_number(self, congress: int, number: int) -> List[Dict[str, Any]]:
+        """Query items by congress and number using GSI"""
+        try:
+            response = self.table.query(
+                IndexName='congress-number-index',
+                KeyConditionExpression='congress = :congress AND #number = :number',
+                ExpressionAttributeNames={
+                    '#number': 'number'
+                },
+                ExpressionAttributeValues={
+                    ':congress': congress,
+                    ':number': number
+                }
+            )
+            items = response.get('Items', [])
+            self.logger.info(f"Retrieved {len(items)} items for congress {congress} and number {number}")
+            return items
+
+        except ClientError as e:
+            self.logger.error(f"DynamoDB query operation failed: {str(e)}")
+            raise Exception(f"DynamoDB query operation failed: {str(e)}")
 
     def store_item(self, item: Dict[str, Any], ttl_hours: int = 0) -> None:
         """Store a single item in DynamoDB"""
@@ -198,48 +308,4 @@ class DynamoHandler:
 
         except ClientError as e:
             self.logger.error(f"DynamoDB scan operation failed for type {item_type}: {str(e)}")
-            raise Exception(f"DynamoDB scan operation failed: {str(e)}")
-
-    def scan_by_type_and_date_range(self, item_type: str, start_date: str, end_date: str) -> List[Dict[str, Any]]:
-        """Scan items by type and date range"""
-        try:
-            response = self.table.scan(
-                FilterExpression='#type = :type AND #update_date BETWEEN :start_date AND :end_date',
-                ExpressionAttributeNames={
-                    '#type': 'type',
-                    '#update_date': 'update_date'
-                },
-                ExpressionAttributeValues={
-                    ':type': item_type,
-                    ':start_date': start_date,
-                    ':end_date': end_date
-                }
-            )
-            items = response.get('Items', [])
-            self.logger.info(f"Retrieved {len(items)} items of type {item_type} between {start_date} and {end_date}")
-            return items
-
-        except ClientError as e:
-            self.logger.error(f"DynamoDB scan operation failed for type {item_type} and date range: {str(e)}")
-            raise Exception(f"DynamoDB scan operation failed: {str(e)}")
-
-    def scan_by_congress_and_number(self, congress: int, number: int) -> List[Dict[str, Any]]:
-        """Scan items by congress and number"""
-        try:
-            response = self.table.scan(
-                FilterExpression='congress = :congress AND #number = :number',
-                ExpressionAttributeNames={
-                    '#number': 'number'
-                },
-                ExpressionAttributeValues={
-                    ':congress': congress,
-                    ':number': number
-                }
-            )
-            items = response.get('Items', [])
-            self.logger.info(f"Retrieved {len(items)} items for congress {congress} and number {number}")
-            return items
-
-        except ClientError as e:
-            self.logger.error(f"DynamoDB scan operation failed for congress {congress} and number {number}: {str(e)}")
             raise Exception(f"DynamoDB scan operation failed: {str(e)}")
