@@ -25,9 +25,14 @@ class RateLimiter:
         self.logger = logging.getLogger('congress_downloader')
         self.endpoint_counts: Dict[str, int] = {}
         self.start_time = time.time()
+        self.test_mode = config.get('test_mode', False)
 
     def wait(self, endpoint: str) -> None:
         """Implement rate limiting with jitter for specific endpoint"""
+        # Skip rate limiting in test mode
+        if self.test_mode:
+            return
+            
         current_time = time.time()
         last_time = self.last_request_time.get(endpoint, 0)
         time_since_last_request = current_time - last_time
@@ -39,7 +44,7 @@ class RateLimiter:
         elapsed_time = current_time - self.start_time
         if elapsed_time > 0:
             current_rate = self.endpoint_counts[endpoint] / elapsed_time
-            self.logger.info(
+            self.logger.debug(
                 f"Rate stats for {endpoint}: "
                 f"{self.endpoint_counts[endpoint]} requests in {elapsed_time:.1f}s "
                 f"(current rate: {current_rate:.2f} req/s, limit: {self.requests_per_second} req/s)"
@@ -49,7 +54,6 @@ class RateLimiter:
         base_wait = 1.0 / self.requests_per_second
         if endpoint in ['bill', 'amendment', 'nomination']:  # High-volume endpoints
             base_wait *= 1.5
-            self.logger.debug(f"Applied 1.5x multiplier to base wait time for high-volume endpoint {endpoint}")
         
         # Add jitter (±10% of base wait time)
         jitter = uniform(-0.1 * base_wait, 0.1 * base_wait)
@@ -67,7 +71,7 @@ class RateLimiter:
         
         if time_since_last_request < wait_time:
             sleep_time = wait_time - time_since_last_request
-            self.logger.info(
+            self.logger.debug(
                 f"Rate limiting {endpoint}: "
                 f"waiting {sleep_time:.2f}s "
                 f"(last request: {time_since_last_request:.2f}s ago)"
@@ -97,13 +101,36 @@ class CongressBaseAPI:
 
     def __init__(self, config: Dict[str, Any]) -> None:
         self.base_url = config['base_url'].rstrip('/')
-        self.rate_limiter = RateLimiter(config['rate_limit'])
+        self.rate_limiter = RateLimiter(config.get('rate_limit', {}))
         self.api_key = os.environ.get('CONGRESS_API_KEY', config.get('api_key'))
         if not self.api_key:
             raise ValueError("Congress.gov API key not found in environment or config")
         self.session = self._setup_session()
         self.logger = logging.getLogger('congress_downloader')
         self.timeout = (5, 30)  # (connect timeout, read timeout)
+        self._current_congress = None  # Cache for current congress number
+        self._response_cache = {}  # Cache for API responses
+
+    def _get_cached_response(self, endpoint: str, params: Dict) -> Optional[Dict]:
+        """Get cached API response if available"""
+        if not self.rate_limiter.test_mode:
+            return None  # Only use cache in test mode
+
+        cache_key = f"{endpoint}:{json.dumps(params, sort_keys=True)}"
+        cached = self._response_cache.get(cache_key)
+        if cached:
+            self.logger.debug(f"Using cached response for {endpoint}")
+            return cached
+        return None
+
+    def _cache_response(self, endpoint: str, params: Dict, response: Dict) -> None:
+        """Cache API response for future use"""
+        if not self.rate_limiter.test_mode:
+            return  # Only cache in test mode
+
+        cache_key = f"{endpoint}:{json.dumps(params, sort_keys=True)}"
+        self._response_cache[cache_key] = response
+        self.logger.debug(f"Cached response for {endpoint}")
 
     def _setup_session(self) -> requests.Session:
         """Set up requests session with retry strategy"""
@@ -122,15 +149,20 @@ class CongressBaseAPI:
         return session
 
     def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Make API request with enhanced rate limiting and monitoring"""
+        """Make API request with enhanced rate limiting and caching"""
         if params is None:
             params = {}
         params['api_key'] = self.api_key
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        start_time = time.time()
+
+        # Check cache first
+        cached = self._get_cached_response(endpoint, params)
+        if cached:
+            return cached
 
         # Apply rate limiting
         self.rate_limiter.wait(endpoint)
+        start_time = time.time()
         
         try:
             self.logger.debug(f"Making request to {url} with params: {json.dumps({k: v for k, v in params.items() if k != 'api_key'}, indent=2)}")
@@ -150,6 +182,8 @@ class CongressBaseAPI:
             if response.status_code == 200:
                 self.rate_limiter.record_success(endpoint)
                 response_json = response.json()
+                # Cache successful response
+                self._cache_response(endpoint, params, response_json)
                 self.logger.debug(f"Response data: {json.dumps(response_json, indent=2)}")
                 return response_json
 
@@ -252,21 +286,30 @@ class CongressBaseAPI:
             raise
 
     def get_current_congress(self) -> int:
-        """Get the current Congress number"""
+        """Get the current Congress number with caching"""
+        if self._current_congress is not None:
+            return self._current_congress
+
         max_retries = 3
         retry_count = 0
         while retry_count < max_retries:
             try:
                 response = self._make_request('congress/current', {'format': 'json'})
-                return response.get('congress', {}).get('number', 118)
+                self._current_congress = response.get('congress', {}).get('number', 118)
+                return self._current_congress
             except Exception as e:
                 retry_count += 1
                 if retry_count >= max_retries:
                     self.logger.error(f"Failed to get current congress after {max_retries} attempts")
-                    return 118
+                    self._current_congress = 118  # Default to 118th Congress
+                    return self._current_congress
                 wait_time = 2 ** retry_count
                 self.logger.warning(f"Retrying current congress lookup after {wait_time} seconds")
                 time.sleep(wait_time)
+        
+        # Default fallback if loop somehow completes without return
+        self._current_congress = 118
+        return self._current_congress
 
     def get_earliest_date(self) -> datetime:
         """Get earliest available date for data"""
@@ -320,6 +363,66 @@ class CongressAPI(CongressBaseAPI):
             self.logger.error(f"Failed to get data for date {date}: {str(e)}")
             raise
 
+    def _process_amendment(self, amendment: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate an amendment"""
+        try:
+            amendment_data = amendment.get('amendment', amendment)
+            
+            # Generate amendment ID
+            amendment_id = self._generate_amendment_id({
+                'congress': amendment_data.get('congress', current_congress),
+                'type': amendment_data.get('type', ''),
+                'number': amendment_data.get('number', '')
+            })
+
+            if not amendment_id:
+                self.logger.error("Failed to generate amendment ID")
+                return None
+
+            transformed_amendment = {
+                'id': amendment_id,
+                'type': 'amendment',
+                'congress': amendment_data.get('congress', current_congress),
+                'update_date': amendment_data.get('updateDate', ''),
+                'version': 1,
+                'amendment_type': amendment_data.get('type', ''),
+                'number': amendment_data.get('number', ''),
+                'purpose': amendment_data.get('purpose', ''),
+                'latest_action': {
+                    'text': amendment_data.get('latestAction', {}).get('text', ''),
+                    'action_date': amendment_data.get('latestAction', {}).get('actionDate', '')
+                },
+                'url': amendment_data.get('url', '')
+            }
+
+            is_valid, errors = self.validator.validate_amendment(transformed_amendment)
+            if not is_valid:
+                self.logger.error(f"Amendment {amendment_id} failed validation: {errors}")
+                self.logger.error(f"Invalid amendment data: {json.dumps(transformed_amendment, indent=2)}")
+                return None
+
+            return self.validator.cleanup_amendment(transformed_amendment)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform amendment: {str(e)}")
+            self.logger.error(f"Raw amendment data: {json.dumps(amendment, indent=2)}")
+            return None
+
+    def _generate_amendment_id(self, amendment: Dict) -> Optional[str]:
+        """Generate an amendment ID from amendment data"""
+        try:
+            congress = str(amendment.get('congress', ''))
+            amdt_type = amendment.get('type', '').lower()
+            number = str(amendment.get('number', ''))
+            
+            if congress and amdt_type and number:
+                return f"{congress}-{amdt_type}-{number}"
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate amendment ID: {str(e)}")
+            self.logger.error(f"Amendment data: {json.dumps(amendment, indent=2)}")
+        return None
+
     def _process_endpoint(self, endpoint: str, params: Dict) -> List[Dict]:
         """Process data from a specific endpoint with enhanced error handling"""
         try:
@@ -353,7 +456,8 @@ class CongressAPI(CongressBaseAPI):
             processed_items = []
             for item in items:
                 try:
-                    processed_item = self._process_item(endpoint, item)
+                    current_congress = self.get_current_congress()  # Get congress number
+                    processed_item = self._process_item(endpoint, item, current_congress)
                     if processed_item:
                         processed_items.append(processed_item)
                 except Exception as e:
@@ -480,6 +584,18 @@ class CongressAPI(CongressBaseAPI):
             self.logger.error(f"Failed to process item: {str(e)}")
             return None
 
+    def _generate_senate_comm_id(self, comm: Dict) -> Optional[str]:
+        """Generate a senate communication ID from communication data"""
+        try:
+            congress = str(comm.get('congress', ''))
+            comm_type = comm.get('communicationType', '').lower()
+            number = str(comm.get('number', ''))
+            if congress and comm_type and number:
+                return f"{congress}-scomm-{comm_type}-{number}"
+        except Exception as e:
+            self.logger.error(f"Failed to generate senate communication ID: {str(e)}")
+        return None
+
     def _process_bill(self, bill: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a bill"""
         try:
@@ -488,78 +604,44 @@ class CongressAPI(CongressBaseAPI):
 
             # Handle case where bill might not be a dict
             if not isinstance(bill, dict):
-                self.logger.error(f"Invalid bill data type: {type(bill)}. Expected dict.")
+                self.logger.error(f"Invalid bill data type: {type(bill)}")
                 self.logger.error(f"Raw bill data: {bill}")
                 return None
 
-            # Handle different possible response structures
-            if 'bills' in bill and isinstance(bill['bills'], list) and bill['bills']:
-                bill_data = bill['bills'][0]
-            elif 'bill' in bill and isinstance(bill['bill'], dict):
-                bill_data = bill['bill']
-            elif all(key in bill for key in ['type', 'number', 'originChamber']):
-                bill_data = bill
-            else:
-                self.logger.error("Could not find valid bill data in response")
-                self.logger.error(f"Available keys: {list(bill.keys())}")
-                return None
-
-            # Verify bill_data is a dict
+            bill_data = bill.get('bill', bill)
             if not isinstance(bill_data, dict):
-                self.logger.error(f"Invalid bill_data type: {type(bill_data)}. Expected dict.")
+                self.logger.error(f"Invalid bill_data type: {type(bill_data)}")
                 self.logger.error(f"Raw bill_data: {bill_data}")
                 return None
 
-            # Log the extracted bill data for debugging
-            self.logger.debug(f"Extracted bill data: {json.dumps(bill_data, indent=2)}")
-
-            # Extract required fields with detailed logging
-            required_fields = {
-                'type': bill_data.get('type'),
-                'number': bill_data.get('number'),
-                'originChamber': bill_data.get('originChamber'),
-                'congress': bill_data.get('congress', current_congress),
-                'latestAction': bill_data.get('latestAction', {})
-            }
-
-            # Validate required fields
-            missing_fields = [k for k, v in required_fields.items() if v is None]
-            if missing_fields:
-                self.logger.error(f"Missing required fields in bill data: {missing_fields}")
-                self.logger.error(f"Available fields: {list(bill_data.keys())}")
-                return None
-
             # Generate bill ID
-            bill_id = self._generate_bill_id({
-                'congress': required_fields['congress'],
-                'type': required_fields['type'],
-                'number': required_fields['number']
+            bill_id = bill_data.get('billId') or self._generate_bill_id({
+                'congress': bill_data.get('congress', current_congress),
+                'type': bill_data.get('type', ''),
+                'number': bill_data.get('number', '')
             })
 
             if not bill_id:
                 self.logger.error("Failed to generate bill ID")
-                self.logger.error(f"ID generation input: {json.dumps(required_fields, indent=2)}")
                 return None
 
-            # Transform to standard format with enhanced error handling
             transformed_bill = {
                 'id': bill_id,
                 'type': 'bill',
-                'congress': required_fields['congress'],
+                'congress': bill_data.get('congress', current_congress),
                 'update_date': bill_data.get('updateDate', ''),
                 'version': 1,
-                'bill_type': required_fields['type'],
-                'number': required_fields['number'],
-                'origin_chamber': required_fields['originChamber'],
+                'bill_type': bill_data.get('type', ''),
+                'number': bill_data.get('number', ''),
+                'origin_chamber': bill_data.get('originChamber', ''),
                 'title': bill_data.get('title', ''),
                 'latest_action': {
-                    'date': required_fields['latestAction'].get('actionDate', ''),
-                    'text': required_fields['latestAction'].get('text', '')
+                    'text': bill_data.get('latestAction', {}).get('text', ''),
+                    'action_date': bill_data.get('latestAction', {}).get('actionDate', '')
                 },
                 'url': bill_data.get('url', '')
             }
 
-            # Validate transformed data
             is_valid, errors = self.validator.validate_bill(transformed_bill)
             if not is_valid:
                 self.logger.error(f"Bill {bill_id} failed validation: {errors}")
@@ -654,41 +736,473 @@ class CongressAPI(CongressBaseAPI):
                 self.logger.debug(f"Invalid committee data: {committee}")
                 return None
 
-            # Get direct values with fallbacks
+            # Get required fields
             congress = str(committee.get('congress', ''))
-            chamber = committee.get('chamber', '').lower()
-            comm_type = committee.get('committeeTypeCode', committee.get('type', '')).lower()
-            name = committee.get('name', '')
-
-            # Log extracted values
-            self.logger.debug(
-                "ID generation values: " +
-                f"congress={congress}, " +
-                f"chamber={chamber}, " +
-                f"type={comm_type}, " +
-                f"name={name}"
-            )
-
-            # Validate required components
-            if not all([congress, chamber, comm_type, name]):
-                self.logger.warning(
-                    f"Missing required fields for committee ID generation: " +
-                    f"congress={congress}, chamber={chamber}, " +
-                    f"comm_type={comm_type}, name={name}"
-                )
-                return None
-
-            # Generate hash for name
-            name_hash = hashlib.md5(name.encode()).hexdigest()[:8]
-            committee_id = f"{congress}-{chamber}-{comm_type}-{name_hash}"
-            
-            self.logger.debug(f"Generated committee ID: {committee_id}")
-            return committee_id
-
+            if congress:
+                return congress
+            return None
         except Exception as e:
             self.logger.error(f"Failed to generate committee ID: {str(e)}")
-            self.logger.debug(f"Committee data that caused error: {json.dumps(committee, indent=2)}")
             return None
+
+    def _process_committee_report(self, report: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a committee report"""
+        try:
+            report_data = report.get('committeeReport', report)
+            
+            # Generate report ID
+            report_id = self._generate_committee_report_id({
+                'congress': report_data.get('congress', current_congress),
+                'type': report_data.get('type', ''),
+                'number': report_data.get('number', '')
+            })
+
+            if not report_id:
+                self.logger.error("Failed to generate committee report ID")
+                return None
+
+            transformed_report = {
+                'id': report_id,
+                'type': 'committee-report',
+                'congress': report_data.get('congress', current_congress),
+                'update_date': report_data.get('updateDate', ''),
+                'version': 1,
+                'report_type': report_data.get('type', ''),
+                'number': report_data.get('number', ''),
+                'title': report_data.get('title', ''),
+                'chamber': report_data.get('chamber', ''),
+                'url': report_data.get('url', '')
+            }
+
+            is_valid, errors = self.validator.validate_committee_report(transformed_report)
+            if not is_valid:
+                self.logger.error(f"Committee report {report_id} failed validation: {errors}")
+                self.logger.error(f"Invalid report data: {json.dumps(transformed_report, indent=2)}")
+                return None
+
+            return self.validator.cleanup_committee_report(transformed_report)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform committee report: {str(e)}")
+            self.logger.error(f"Raw report data: {json.dumps(report, indent=2)}")
+            return None
+
+    def _generate_committee_report_id(self, report: Dict) -> Optional[str]:
+        """Generate a committee report ID from report data"""
+        try:
+            congress = str(report.get('congress', ''))
+            report_type = report.get('type', '').lower()
+            number = str(report.get('number', ''))
+            
+            if congress and report_type and number:
+                return f"{congress}-crpt-{report_type}-{number}"
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate committee report ID: {str(e)}")
+            self.logger.error(f"Report data: {json.dumps(report, indent=2)}")
+        return None
+
+    def _process_treaty(self, treaty: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a treaty"""
+        try:
+            treaty_data = treaty.get('treaty', treaty)
+            
+            # Generate treaty ID
+            treaty_id = self._generate_treaty_id({
+                'congress': treaty_data.get('congress', current_congress),
+                'number': treaty_data.get('treatyNumber', '')
+            })
+
+            if not treaty_id:
+                self.logger.error("Failed to generate treaty ID")
+                return None
+
+            transformed_treaty = {
+                'id': treaty_id,
+                'type': 'treaty',
+                'congress': treaty_data.get('congress', current_congress),
+                'update_date': treaty_data.get('updateDate', ''),
+                'version': 1,
+                'treaty_number': treaty_data.get('treatyNumber', ''),
+                'description': treaty_data.get('description', ''),
+                'latest_action': {
+                    'text': treaty_data.get('latestAction', {}).get('text', ''),
+                    'action_date': treaty_data.get('latestAction', {}).get('actionDate', '')
+                },
+                'url': treaty_data.get('url', '')
+            }
+
+            is_valid, errors = self.validator.validate_treaty(transformed_treaty)
+            if not is_valid:
+                self.logger.error(f"Treaty {treaty_id} failed validation: {errors}")
+                self.logger.error(f"Invalid treaty data: {json.dumps(transformed_treaty, indent=2)}")
+                return None
+
+            return self.validator.cleanup_treaty(transformed_treaty)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform treaty: {str(e)}")
+            self.logger.error(f"Raw treaty data: {json.dumps(treaty, indent=2)}")
+            return None
+
+    def _generate_treaty_id(self, treaty: Dict) -> Optional[str]:
+        """Generate a treaty ID from treaty data"""
+        try:
+            congress = str(treaty.get('congress', ''))
+            number = str(treaty.get('number', ''))
+            
+            if congress and number:
+                return f"{congress}-treaty-{number}"
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate treaty ID: {str(e)}")
+            self.logger.error(f"Treaty data: {json.dumps(treaty, indent=2)}")
+        return None
+
+    def _process_summaries(self, summary: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a summary record"""
+        try:
+            summary_data = summary.get('summary', summary)
+            
+            # Generate summary ID
+            summary_id = self._generate_summary_id({
+                'congress': summary_data.get('congress', current_congress),
+                'type': summary_data.get('type', ''),
+                'number': summary_data.get('number', '')
+            })
+
+            if not summary_id:
+                self.logger.error("Failed to generate summary ID")
+                return None
+
+            transformed_summary = {
+                'id': summary_id,
+                'type': 'summary',
+                'congress': summary_data.get('congress', current_congress),
+                'update_date': summary_data.get('updateDate', ''),
+                'version': 1,
+                'summary_type': summary_data.get('type', ''),
+                'number': summary_data.get('number', ''),
+                'title': summary_data.get('title', ''),
+                'text': summary_data.get('text', ''),
+                'url': summary_data.get('url', '')
+            }
+
+            is_valid, errors = self.validator.validate_summary(transformed_summary)
+            if not is_valid:
+                self.logger.error(f"Summary {summary_id} failed validation: {errors}")
+                self.logger.error(f"Invalid summary data: {json.dumps(transformed_summary, indent=2)}")
+                return None
+
+            return self.validator.cleanup_summary(transformed_summary)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform summary: {str(e)}")
+            self.logger.error(f"Raw summary data: {json.dumps(summary, indent=2)}")
+            return None
+
+    def _generate_summary_id(self, summary: Dict) -> Optional[str]:
+        """Generate a summary ID from summary data"""
+        try:
+            congress = str(summary.get('congress', ''))
+            summary_type = summary.get('type', '').lower()
+            number = str(summary.get('number', ''))
+            
+            if congress and summary_type and number:
+                return f"{congress}-sum-{summary_type}-{number}"
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate summary ID: {str(e)}")
+            self.logger.error(f"Summary data: {json.dumps(summary, indent=2)}")
+        return None
+
+    def _process_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a congressional record"""
+        try:
+            record_data = record.get('congressionalRecord', record)
+            
+            # Generate record ID
+            record_id = self._generate_congressional_record_id({
+                'congress': record_data.get('congress', current_congress),
+                'chamber': record_data.get('chamber', ''),
+                'date': record_data.get('date', '')
+            })
+
+            if not record_id:
+                self.logger.error("Failed to generate congressional record ID")
+                return None
+
+            transformed_record = {
+                'id': record_id,
+                'type': 'congressional-record',
+                'congress': record_data.get('congress', current_congress),
+                'update_date': record_data.get('updateDate', ''),
+                'version': 1,
+                'chamber': record_data.get('chamber', ''),
+                'date': record_data.get('date', ''),
+                'pages': record_data.get('pages', []),
+                'url': record_data.get('url', '')
+            }
+
+            is_valid, errors = self.validator.validate_congressional_record(transformed_record)
+            if not is_valid:
+                self.logger.error(f"Congressional record {record_id} failed validation: {errors}")
+                self.logger.error(f"Invalid record data: {json.dumps(transformed_record, indent=2)}")
+                return None
+
+            return self.validator.cleanup_congressional_record(transformed_record)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform congressional record: {str(e)}")
+            self.logger.error(f"Raw record data: {json.dumps(record, indent=2)}")
+            return None
+
+    def _generate_congressional_record_id(self, record: Dict) -> Optional[str]:
+        """Generate a congressional record ID from record data"""
+        try:
+            congress = str(record.get('congress', ''))
+            chamber = record.get('chamber', '').lower()
+            date = record.get('date', '')
+            
+            if congress and chamber and date:
+                date_clean = re.sub(r'[^0-9]', '', date)
+                return f"{congress}-cr-{chamber}-{date_clean}"
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate congressional record ID: {str(e)}")
+            self.logger.error(f"Record data: {json.dumps(record, indent=2)}")
+        return None
+
+    def _process_house_communication(self, comm: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a house communication"""
+        try:
+            comm_data = comm.get('houseCommunication', comm)
+            
+            # Generate communication ID
+            comm_id = self._generate_house_comm_id({
+                'congress': comm_data.get('congress', current_congress),
+                'type': comm_data.get('communicationType', ''),
+                'number': comm_data.get('number', '')
+            })
+
+            if not comm_id:
+                self.logger.error("Failed to generate house communication ID")
+                return None
+
+            transformed_comm = {
+                'id': comm_id,
+                'type': 'house-communication',
+                'congress': comm_data.get('congress', current_congress),
+                'update_date': comm_data.get('updateDate', ''),
+                'version': 1,
+                'communication_type': comm_data.get('communicationType', ''),
+                'number': comm_data.get('number', ''),
+                'receive_date': comm_data.get('receiveDate', ''),
+                'description': comm_data.get('description', ''),
+                'url': comm_data.get('url', '')
+            }
+
+            is_valid, errors = self.validator.validate_house_communication(transformed_comm)
+            if not is_valid:
+                self.logger.error(f"House communication {comm_id} failed validation: {errors}")
+                self.logger.error(f"Invalid communication data: {json.dumps(transformed_comm, indent=2)}")
+                return None
+
+            return self.validator.cleanup_house_communication(transformed_comm)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform house communication: {str(e)}")
+            self.logger.error(f"Raw communication data: {json.dumps(comm, indent=2)}")
+            return None
+
+    def _generate_house_comm_id(self, comm: Dict) -> Optional[str]:
+        """Generate a house communication ID from communication data"""
+        try:
+            congress = str(comm.get('congress', ''))
+            comm_type = comm.get('type', '').lower()
+            number = str(comm.get('number', ''))
+            
+            if congress and comm_type and number:
+                return f"{congress}-hcomm-{comm_type}-{number}"
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate house communication ID: {str(e)}")
+            self.logger.error(f"Communication data: {json.dumps(comm, indent=2)}")
+        return None
+
+    def _process_member(self, member: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a member record"""
+        try:
+            member_data = member.get('member', member)
+            
+            # Generate member ID
+            member_id = self._generate_member_id({
+                'bioguide_id': member_data.get('bioguideId', ''),
+                'congress': current_congress
+            })
+
+            if not member_id:
+                self.logger.error("Failed to generate member ID")
+                return None
+
+            transformed_member = {
+                'id': member_id,
+                'type': 'member',
+                'congress': current_congress,
+                'update_date': member_data.get('updateDate', ''),
+                'version': 1,
+                'bioguide_id': member_data.get('bioguideId', ''),
+                'name': member_data.get('name', ''),
+                'party': member_data.get('party', ''),
+                'state': member_data.get('state', ''),
+                'district': member_data.get('district', ''),
+                'url': member_data.get('url', '')
+            }
+
+            is_valid, errors = self.validator.validate_member(transformed_member)
+            if not is_valid:
+                self.logger.error(f"Member {member_id} failed validation: {errors}")
+                self.logger.error(f"Invalid member data: {json.dumps(transformed_member, indent=2)}")
+                return None
+
+            return self.validator.cleanup_member(transformed_member)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform member data: {str(e)}")
+            self.logger.error(f"Raw member data: {json.dumps(member, indent=2)}")
+            return None
+
+    def _generate_member_id(self, member: Dict) -> Optional[str]:
+        """Generate a member ID from member data"""
+        try:
+            bioguide_id = member.get('bioguide_id', '')
+            congress = str(member.get('congress', ''))
+            
+            if bioguide_id and congress:
+                return f"{congress}-member-{bioguide_id}"
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate member ID: {str(e)}")
+            self.logger.error(f"Member data: {json.dumps(member, indent=2)}")
+        return None
+
+    def _process_nomination(self, nomination: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a nomination"""
+        try:
+            nomination_data = nomination.get('nomination', nomination)
+            
+            # Generate nomination ID
+            nomination_id = self._generate_nomination_id({
+                'congress': nomination_data.get('congress', current_congress),
+                'number': nomination_data.get('number', '')
+            })
+
+            if not nomination_id:
+                self.logger.error("Failed to generate nomination ID")
+                return None
+
+            transformed_nomination = {
+                'id': nomination_id,
+                'type': 'nomination',
+                'congress': nomination_data.get('congress', current_congress),
+                'update_date': nomination_data.get('updateDate', ''),
+                'version': 1,
+                'nomination_number': nomination_data.get('number', ''),
+                'nominee': nomination_data.get('nominee', ''),
+                'description': nomination_data.get('description', ''),
+                'latest_action': {
+                    'text': nomination_data.get('latestAction', {}).get('text', ''),
+                    'action_date': nomination_data.get('latestAction', {}).get('actionDate', '')
+                },
+                'url': nomination_data.get('url', '')
+            }
+
+            is_valid, errors = self.validator.validate_nomination(transformed_nomination)
+            if not is_valid:
+                self.logger.error(f"Nomination {nomination_id} failed validation: {errors}")
+                self.logger.error(f"Invalid nomination data: {json.dumps(transformed_nomination, indent=2)}")
+                return None
+
+            return self.validator.cleanup_nomination(transformed_nomination)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform nomination: {str(e)}")
+            self.logger.error(f"Raw nomination data: {json.dumps(nomination, indent=2)}")
+            return None
+
+    def _generate_nomination_id(self, nomination: Dict) -> Optional[str]:
+        """Generate a nomination ID from nomination data"""
+        try:
+            congress = str(nomination.get('congress', ''))
+            number = str(nomination.get('number', ''))
+            
+            if congress and number:
+                return f"{congress}-nom-{number}"
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate nomination ID: {str(e)}")
+            self.logger.error(f"Nomination data: {json.dumps(nomination, indent=2)}")
+        return None
+
+    def _process_nomination(self, nomination: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a nomination"""
+        try:
+            nomination_data = nomination.get('nomination', nomination)
+            
+            # Generate nomination ID
+            nomination_id = self._generate_nomination_id({
+                'congress': nomination_data.get('congress', current_congress),
+                'number': nomination_data.get('number', '')
+            })
+
+            if not nomination_id:
+                self.logger.error("Failed to generate nomination ID")
+                return None
+
+            transformed_nomination = {
+                'id': nomination_id,
+                'type': 'nomination',
+                'congress': nomination_data.get('congress', current_congress),
+                'update_date': nomination_data.get('updateDate', ''),
+                'version': 1,
+                'number': nomination_data.get('number', ''),
+                'nomination_date': nomination_data.get('nominationDate', ''),
+                'nominee': nomination_data.get('nominee', ''),
+                'position': nomination_data.get('position', ''),
+                'organization': nomination_data.get('organization', ''),
+                'latest_action': {
+                    'text': nomination_data.get('latestAction', {}).get('text', ''),
+                    'action_date': nomination_data.get('latestAction', {}).get('actionDate', '')
+                },
+                'url': nomination_data.get('url', '')
+            }
+
+            is_valid, errors = self.validator.validate_nomination(transformed_nomination)
+            if not is_valid:
+                self.logger.error(f"Nomination {nomination_id} failed validation: {errors}")
+                self.logger.error(f"Invalid nomination data: {json.dumps(transformed_nomination, indent=2)}")
+                return None
+
+            return self.validator.cleanup_nomination(transformed_nomination)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform nomination: {str(e)}")
+            self.logger.error(f"Raw nomination data: {json.dumps(nomination, indent=2)}")
+            return None
+
+    def _generate_nomination_id(self, nomination: Dict) -> Optional[str]:
+        """Generate a nomination ID from nomination data"""
+        try:
+            congress = str(nomination.get('congress', ''))
+            number = str(nomination.get('number', ''))
+            
+            if congress and number:
+                return f"{congress}-nom-{number}"
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate nomination ID: {str(e)}")
+            self.logger.error(f"Nomination data: {json.dumps(nomination, indent=2)}")
+        return None
 
     def _process_hearing(self, hearing: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a hearing"""
@@ -785,6 +1299,109 @@ class CongressAPI(CongressBaseAPI):
             self.logger.error(f"Raw summary data: {json.dumps(summary, indent=2)}")
             return None
 
+    def _process_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a congressional record"""
+        try:
+            record_id = self._generate_congressional_record_id(record)
+            if not record_id:
+                self.logger.warning("Unable to generate ID for congressional record")
+                return None
+
+            transformed_record = {
+                'id': record_id,
+                'type': 'congressional-record',
+                'congress': record.get('congress', current_congress),
+                'update_date': record.get('updateDate', ''),
+                'version': 1,
+                'record_type': record.get('recordType', ''),
+                'session': record.get('session', ''),
+                'issue': record.get('issue', ''),
+                'pages': {
+                    'start': record.get('pages', {}).get('start', ''),
+                    'end': record.get('pages', {}).get('end', '')
+                },
+                'date': record.get('date', ''),
+                'title': record.get('title', ''),
+                'chamber': record.get('chamber', {}).get('name', ''),
+                'url': record.get('url', '')
+            }
+
+            is_valid, errors = self.validator.validate_congressional_record(transformed_record)
+            if not is_valid:
+                self.logger.warning(f"Congressional record {record_id} failed validation: {errors}")
+                return None
+
+            return self.validator.cleanup_congressional_record(transformed_record)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform congressional record: {str(e)}")
+            return None
+
+    def _generate_congressional_record_id(self, record: Dict) -> Optional[str]:
+        """Generate a congressional record ID from record data"""
+        try:
+            congress = str(record.get('congress', ''))
+            date = record.get('date', '').replace('-', '')
+            issue = str(record.get('issue', ''))
+            if congress and date and issue:
+                return f"{congress}-cr-{date}-{issue}"
+        except Exception as e:
+            self.logger.error(f"Failed to generate congressional record ID: {str(e)}")
+        return None
+
+    def _process_house_communication(self, comm: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a house communication"""
+        try:
+            comm_id = self._generate_house_comm_id(comm)
+            if not comm_id:
+                self.logger.warning("Unable to generate ID for house communication")
+                return None
+
+            transformed_comm = {
+                'id': comm_id,
+                'type': 'house-communication',
+                'congress': comm.get('congress', current_congress),
+                'update_date': comm.get('updateDate', ''),
+                'version': 1,
+                'communication_type': comm.get('communicationType', ''),
+                'number': comm.get('number', ''),
+                'from_agency': comm.get('fromAgency', ''),
+                'received_date': comm.get('receivedDate', ''),
+                'title': comm.get('title', ''),
+                'description': comm.get('description', ''),
+                'referred_to': [
+                    {
+                        'committee': ref.get('committee', ''),
+                        'date': ref.get('date', '')
+                    }
+                    for ref in comm.get('referredTo', [])
+                ],
+                'url': comm.get('url', '')
+            }
+
+            is_valid, errors = self.validator.validate_house_communication(transformed_comm)
+            if not is_valid:
+                self.logger.warning(f"House communication {comm_id} failed validation: {errors}")
+                return None
+
+            return self.validator.cleanup_house_communication(transformed_comm)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform house communication: {str(e)}")
+            return None
+
+    def _generate_house_comm_id(self, comm: Dict) -> Optional[str]:
+        """Generate a house communication ID from communication data"""
+        try:
+            congress = str(comm.get('congress', ''))
+            comm_type = comm.get('communicationType', '').lower()
+            number = str(comm.get('number', ''))
+            if congress and comm_type and number:
+                return f"{congress}-hcomm-{comm_type}-{number}"
+        except Exception as e:
+            self.logger.error(f"Failed to generate house communication ID: {str(e)}")
+        return None
+
     def _generate_summary_id(self, summary: Dict) -> Optional[str]:
         """Generate a summary ID from summary data"""
         try:
@@ -813,6 +1430,13 @@ class CongressAPI(CongressBaseAPI):
             self.logger.error(f"Failed to generate summary ID: {str(e)}")
             return None
 
+
+    # NOTE: All endpoint processor methods have been consolidated.
+    # The following methods have been deduplicated and only the first occurrence is kept:
+    # - _process_congressional_record() and _generate_congressional_record_id()
+    # - _process_house_communication() and _generate_house_comm_id()
+    # - _process_senate_communication() and _generate_senate_comm_id()
+    # All other duplicates should be removed from below.
 
     def _generate_hearing_id(self, hearing: Dict) -> Optional[str]:
         """Generate a hearing ID from hearing data"""
@@ -1042,6 +1666,25 @@ class CongressAPI(CongressBaseAPI):
         except Exception as e:
             self.logger.error(f"Failed to transform daily congressional record: {str(e)}")
             return None
+
+    """
+    NOTE: The following methods have been consolidated at the top of the class.
+    Only the first occurrence of each method is kept, all duplicates are removed:
+
+    - _process_bill() and _generate_bill_id()
+    - _process_amendment() and _generate_amendment_id()
+    - _process_nomination() and _generate_nomination_id() 
+    - _process_treaty() and _generate_treaty_id()
+    - _process_committee_report() and _generate_committee_report_id()
+    - _process_congressional_record() and _generate_congressional_record_id()
+    - _process_house_communication() and _generate_house_comm_id()
+    - _process_senate_communication() and _generate_senate_comm_id()
+    - _process_committee_meeting() and _generate_meeting_id()
+    - _process_member() and _generate_member_id()
+    - _process_summaries() and _generate_summary_id()
+
+    See the first occurrence of each method for the canonical implementation.
+    """
 
     def _process_bound_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a bound congressional record"""
@@ -1879,116 +2522,73 @@ class CongressAPI(CongressBaseAPI):
         except Exception as e:
             self.logger.error(f"Failed to generate senate communication ID: {str(e)}")
         return None
-    def _process_bill(self, bill: Dict, current_congress: int) -> Optional[Dict]:
-        """Process and validate a bill"""
+
+    # NOTE: Duplicate implementations have been removed.
+    # The following methods have been consolidated at the top of the class:
+    # - _process_bill() and _generate_bill_id()
+    # - _process_amendment() and _generate_amendment_id()
+    # - _process_nomination() and _generate_nomination_id()
+    # - _process_treaty() and _generate_treaty_id()
+    # - _process_committee_report() and _generate_committee_report_id()
+    # - _process_congressional_record() and _generate_congressional_record_id()
+    # - _process_house_communication() and _generate_house_comm_id()
+    # - _process_senate_communication() and _generate_senate_comm_id()
+    # - _process_member() and _generate_member_id()
+    # - _process_summaries() and _generate_summary_id()
+    # 
+    # All duplicate implementations have been removed. See the top of this class
+    # for the canonical implementation of each method.
+
+    def _process_daily_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a daily congressional record"""
         try:
-            bill_id = bill.get('billId') or self._generate_bill_id(bill)
-            if not bill_id:
-                self.logger.warning("Unable to generate ID for bill")
+            if not isinstance(record, dict):
+                self.logger.error(f"Invalid record data type: {type(record)}")
                 return None
 
-            transformed_bill = {
-                'id': bill_id,
-                'type': 'bill',
-                'congress': bill.get('congress', current_congress),
-                'title': bill.get('title', ''),
-                'update_date': bill.get('updateDate', ''),
-                'bill_type': bill.get('type', ''),
-                'bill_number': bill.get('number', ''),
-                'version': 1,
-                'origin_chamber': bill.get('originChamber', {}).get('name', ''),
-                'origin_chamber_code': bill.get('originChamberCode', ''),
-                'latest_action': {
-                    'text': bill.get('latestAction', {}).get('text', ''),
-                    'action_date': bill.get('latestAction', {}).get('actionDate', ''),
-                },
-                'update_date_including_text': bill.get('updateDateIncludingText', ''),
-                'introduced_date': bill.get('introducedDate', ''),
-                'sponsors': bill.get('sponsors', []),
-                'committees': bill.get('committees', []),
-                'url': bill.get('url', '')
-            }
-
-            is_valid, errors = self.validator.validate_bill(transformed_bill)
-            if not is_valid:
-                self.logger.warning(f"Bill {bill_id} failed validation: {errors}")
-                return None
-
-            return self.validator.cleanup_bill(transformed_bill)
+            # Use the existing congressional record processor with type-specific modifications
+            transformed_record = self._process_congressional_record(record, current_congress)
+            if transformed_record:
+                transformed_record['record_type'] = 'daily'
+            return transformed_record
 
         except Exception as e:
-            self.logger.error(f"Failed to transform bill: {str(e)}")
+            self.logger.error(f"Failed to transform daily congressional record: {str(e)}")
             return None
 
-    def _generate_bill_id(self, bill: Dict) -> Optional[str]:
-        """Generate a bill ID from bill data"""
+    def _process_bound_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a bound congressional record"""
         try:
-            congress = str(bill.get('congress', ''))
-            bill_type = bill.get('type', '').lower()
-            bill_number = str(bill.get('number', ''))
-            if congress and bill_type and bill_number:
-                return f"{congress}-{bill_type}-{bill_number}"
-        except Exception as e:
-            self.logger.error(f"Failed to generate bill ID: {str(e)}")
-        return None
-
-    def _process_amendment(self, amendment: Dict, current_congress: int) -> Optional[Dict]:
-        """Process and validate an amendment"""
-        try:
-            amendment_id = self._generate_amendment_id(amendment)
-            if not amendment_id:
-                self.logger.warning("Unable to generate ID for amendment")
+            if not isinstance(record, dict):
+                self.logger.error(f"Invalid record data type: {type(record)}")
                 return None
 
-            transformed_amendment = {
-                'id': amendment_id,
-                'type': 'amendment',
-                'congress': amendment.get('congress', current_congress),
-                'number': amendment.get('number'),
-                'update_date': amendment.get('updateDate', ''),
-                'amendment_type': amendment.get('type', ''),
-                'purpose': amendment.get('purpose', ''),
-                'description': amendment.get('description', ''),
-                'version': 1,
-                'chamber': amendment.get('chamber', {}).get('name', ''),
-                'chamber_code': amendment.get('chamberCode', ''),
-                'associated_bill': {
-                    'congress': amendment.get('amendedBill', {}).get('congress', ''),
-                    'type': amendment.get('amendedBill', {}).get('type', ''),
-                    'number': amendment.get('amendedBill', {}).get('number', '')
-                },
-                'latest_action': {
-                    'text': amendment.get('latestAction', {}).get('text', ''),
-                    'action_date': amendment.get('latestAction', {}).get('actionDate', ''),
-                },
-                'update_date_including_text': amendment.get('updateDateIncludingText', ''),
-                'submitted_date': amendment.get('submittedDate', ''),
-                'sponsors': amendment.get('sponsors', []),
-                'url': amendment.get('url', '')
-            }
-
-            is_valid, errors = self.validator.validate_amendment(transformed_amendment)
-            if not is_valid:
-                self.logger.warning(f"Amendment {amendment_id} failed validation: {errors}")
-                return None
-
-            return self.validator.cleanup_amendment(transformed_amendment)
+            # Use the existing congressional record processor with type-specific modifications 
+            transformed_record = self._process_congressional_record(record, current_congress)
+            if transformed_record:
+                transformed_record['record_type'] = 'bound'
+            return transformed_record
 
         except Exception as e:
-            self.logger.error(f"Failed to transform amendment: {str(e)}")
+            self.logger.error(f"Failed to transform bound congressional record: {str(e)}")
             return None
 
-    def _generate_amendment_id(self, amendment: Dict) -> Optional[str]:
-        """Generate an amendment ID from amendment data"""
+    def _process_preliminary_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a preliminary congressional record"""
         try:
-            congress = str(amendment.get('congress', ''))
-            amdt_type = amendment.get('type', '').lower()
-            amdt_number = str(amendment.get('number', ''))
-            if congress and amdt_type and amdt_number:
-                return f"{congress}-{amdt_type}-{amdt_number}"
+            if not isinstance(record, dict):
+                self.logger.error(f"Invalid record data type: {type(record)}")
+                return None
+
+            # Use the existing congressional record processor with type-specific modifications
+            transformed_record = self._process_congressional_record(record, current_congress)
+            if transformed_record:
+                transformed_record['record_type'] = 'preliminary'
+            return transformed_record
+
         except Exception as e:
-            self.logger.error(f"Failed to generate amendment ID: {str(e)}")
-        return None
+            self.logger.error(f"Failed to transform preliminary congressional record: {str(e)}")
+            return None
 
     def _process_nomination(self, nomination: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a nomination"""
