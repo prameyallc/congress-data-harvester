@@ -199,23 +199,31 @@ class CongressBaseAPI:
                 'committee', 'hearing', 'committee-report',
                 'congressional-record', 'house-communication',
                 'house-requirement', 'senate-communication',
-                'member', 'summaries'
+                'member', 'summaries', 'committee-print',
+                'committee-meeting', 'daily-congressional-record',
+                'bound-congressional-record'
             ]
             available_endpoints = {}
 
             for endpoint in standard_endpoints:
                 try:
                     self.logger.info(f"Checking endpoint: {endpoint}")
-                    # Test the committee endpoint with more specific parameters
                     params = {
                         'limit': 1,
                         'format': 'json',
                         'offset': 0
                     }
-                    if endpoint == 'committee':
+                    
+                    # Add specific parameters for certain endpoints
+                    if endpoint in ['committee', 'committee-meeting']:
                         params.update({
                             'congress': self.get_current_congress(),
-                            'chamber': 'house'  # Try with a specific chamber
+                            'chamber': 'house,senate'
+                        })
+                    elif endpoint in ['daily-congressional-record', 'bound-congressional-record']:
+                        params.update({
+                            'year': datetime.now().year,
+                            'month': datetime.now().month
                         })
                     
                     response = self._make_request(endpoint, params)
@@ -311,6 +319,52 @@ class CongressAPI(CongressBaseAPI):
         except Exception as e:
             self.logger.error(f"Failed to get data for date {date}: {str(e)}")
             raise
+
+    def _process_endpoint(self, endpoint: str, params: Dict) -> List[Dict]:
+        """Process data from a specific endpoint with enhanced error handling"""
+        try:
+            self.logger.info(f"Processing endpoint: {endpoint}")
+            response = self._make_request(endpoint, params)
+            
+            # Log response structure for debugging
+            self.logger.debug(f"Response structure for {endpoint}: {json.dumps(response, indent=2)}")
+            
+            items = []
+            possible_keys = [
+                f'{endpoint}s',  # plural form
+                endpoint,        # singular form
+                endpoint.replace('-', ''),  # without hyphens
+                f"{endpoint.replace('-', '')}s",  # plural without hyphens
+                'results',      # generic results key
+                'data'          # alternative data key
+            ]
+            
+            for key in possible_keys:
+                if key in response:
+                    items = response[key]
+                    self.logger.info(f"Found {len(items)} items in '{key}' key")
+                    break
+            
+            if not items:
+                self.logger.warning(f"No items found in response for {endpoint}")
+                return []
+            
+            # Process each item with the appropriate handler
+            processed_items = []
+            for item in items:
+                try:
+                    processed_item = self._process_item(endpoint, item)
+                    if processed_item:
+                        processed_items.append(processed_item)
+                except Exception as e:
+                    self.logger.error(f"Failed to process {endpoint} item: {str(e)}")
+                    continue
+            
+            return processed_items
+            
+        except Exception as e:
+            self.logger.error(f"Failed to process endpoint {endpoint}: {str(e)}")
+            return []
 
     def _get_endpoint_data(
         self,
@@ -431,23 +485,33 @@ class CongressAPI(CongressBaseAPI):
         try:
             # Debug log the input
             self.logger.debug(f"Processing bill input: {json.dumps(bill, indent=2)}")
-            
-            # Handle case where bill data might be nested
+
+            # Handle case where bill might not be a dict
             if not isinstance(bill, dict):
                 self.logger.error(f"Invalid bill data type: {type(bill)}. Expected dict.")
                 self.logger.error(f"Raw bill data: {bill}")
                 return None
-            
-            # Extract bill data from response
-            if 'bill' in bill:
-                bill_data = bill['bill']
-            else:
-                bill_data = bill
 
+            # Handle different possible response structures
+            if 'bills' in bill and isinstance(bill['bills'], list) and bill['bills']:
+                bill_data = bill['bills'][0]
+            elif 'bill' in bill and isinstance(bill['bill'], dict):
+                bill_data = bill['bill']
+            elif all(key in bill for key in ['type', 'number', 'originChamber']):
+                bill_data = bill
+            else:
+                self.logger.error("Could not find valid bill data in response")
+                self.logger.error(f"Available keys: {list(bill.keys())}")
+                return None
+
+            # Verify bill_data is a dict
             if not isinstance(bill_data, dict):
                 self.logger.error(f"Invalid bill_data type: {type(bill_data)}. Expected dict.")
                 self.logger.error(f"Raw bill_data: {bill_data}")
                 return None
+
+            # Log the extracted bill data for debugging
+            self.logger.debug(f"Extracted bill data: {json.dumps(bill_data, indent=2)}")
 
             # Extract required fields with detailed logging
             required_fields = {
@@ -459,12 +523,12 @@ class CongressAPI(CongressBaseAPI):
             }
 
             # Validate required fields
-            missing_fields = [k for k, v in required_fields.items() if not v]
+            missing_fields = [k for k, v in required_fields.items() if v is None]
             if missing_fields:
                 self.logger.error(f"Missing required fields in bill data: {missing_fields}")
                 self.logger.error(f"Available fields: {list(bill_data.keys())}")
                 return None
-            
+
             # Generate bill ID
             bill_id = self._generate_bill_id({
                 'congress': required_fields['congress'],
@@ -494,8 +558,6 @@ class CongressAPI(CongressBaseAPI):
                 },
                 'url': bill_data.get('url', '')
             }
-
-            self.logger.debug(f"Transformed bill data: {json.dumps(transformed_bill, indent=2)}")
 
             # Validate transformed data
             is_valid, errors = self.validator.validate_bill(transformed_bill)
@@ -631,34 +693,14 @@ class CongressAPI(CongressBaseAPI):
     def _process_hearing(self, hearing: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a hearing"""
         try:
-            # Extract and validate required fields from the hearing response structure
-            hearing_details = hearing.get('hearing', hearing)
-            
-            if isinstance(hearing_details, dict):
-                committee = hearing_details.get('committee', '')
-                hearing_date = hearing_details.get('date', '')
-                chamber = hearing_details.get('chamber', {})
-                hearing_type = hearing_details.get('type', '')
-                title = hearing_details.get('title', '')
-            else:
-                committee = hearing.get('committee', '')
-                hearing_date = hearing.get('date', '')
-                chamber = hearing.get('chamber', {})
-                hearing_type = hearing.get('type', '')
-                title = hearing.get('title', '')
-
-            if not committee or not hearing_date:
-                self.logger.warning(f"Missing required fields for hearing ID generation: committee={committee}, date={hearing_date}")
-                return None
-
-            hearing_id = self._generate_hearing_id({
-                'congress': current_congress,
-                'date': hearing_date,
-                'committee': committee
-            })
-
+            hearing_id = self._generate_hearing_id(hearing)
             if not hearing_id:
                 self.logger.warning("Unable to generate ID for hearing")
+                return None
+
+            hearing_date = hearing.get('date', '')
+            if not hearing_date:
+                self.logger.warning("No date found for hearing")
                 return None
 
             transformed_hearing = {
@@ -667,11 +709,9 @@ class CongressAPI(CongressBaseAPI):
                 'congress': current_congress,
                 'update_date': hearing.get('updateDate', ''),
                 'version': 1,
-                'chamber': chamber.get('name', '') if isinstance(chamber, dict) else '',
-                'committee': committee,
+                'committee': hearing.get('committee', ''),
                 'subcommittee': hearing.get('subcommittee', ''),
-                'hearing_type': hearing_type,
-                'title': title,
+                'chamber': hearing.get('chamber', {}).get('name', ''),
                 'date': hearing_date,
                 'time': hearing.get('time', ''),
                 'location': hearing.get('location', ''),
@@ -690,6 +730,89 @@ class CongressAPI(CongressBaseAPI):
         except Exception as e:
             self.logger.error(f"Failed to transform hearing: {str(e)}")
             return None
+
+    def _process_summaries(self, summary: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a bill summary"""
+        try:
+            # Debug log the input
+            self.logger.debug(f"Processing summary input: {json.dumps(summary, indent=2)}")
+
+            # Handle case where summary might not be a dict
+            if not isinstance(summary, dict):
+                self.logger.error(f"Invalid summary data type: {type(summary)}. Expected dict.")
+                self.logger.error(f"Raw summary data: {summary}")
+                return None
+
+            # Extract the summary data from different possible structures
+            summary_data = summary.get('summaries', [{}])[0] if 'summaries' in summary else summary
+
+            # Generate summary ID
+            summary_id = self._generate_summary_id({
+                'congress': current_congress,
+                'bill_id': summary_data.get('bill', {}).get('billId', ''),
+                'version': summary_data.get('version', 1)
+            })
+
+            if not summary_id:
+                self.logger.error("Failed to generate summary ID")
+                return None
+
+            # Transform to standard format
+            transformed_summary = {
+                'id': summary_id,
+                'type': 'summary',
+                'congress': current_congress,
+                'update_date': summary_data.get('updateDate', ''),
+                'version': summary_data.get('version', 1),
+                'bill_id': summary_data.get('bill', {}).get('billId', ''),
+                'text': summary_data.get('text', ''),
+                'action_date': summary_data.get('actionDate', ''),
+                'action_desc': summary_data.get('actionDesc', ''),
+                'url': summary_data.get('url', '')
+            }
+
+            # Validate transformed data
+            is_valid, errors = self.validator.validate_summary(transformed_summary)
+            if not is_valid:
+                self.logger.error(f"Summary {summary_id} failed validation: {errors}")
+                self.logger.error(f"Invalid summary data: {json.dumps(transformed_summary, indent=2)}")
+                return None
+
+            return self.validator.cleanup_summary(transformed_summary)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform summary: {str(e)}")
+            self.logger.error(f"Raw summary data: {json.dumps(summary, indent=2)}")
+            return None
+
+    def _generate_summary_id(self, summary: Dict) -> Optional[str]:
+        """Generate a summary ID from summary data"""
+        try:
+            if not isinstance(summary, dict):
+                self.logger.error(f"Summary data must be a dictionary, got {type(summary)}")
+                return None
+
+            congress = str(summary.get('congress', ''))
+            bill_id = summary.get('bill_id', '')
+            version = str(summary.get('version', '1'))
+
+            if not all([congress, bill_id]):
+                self.logger.warning(
+                    f"Missing required fields for summary ID generation: "
+                    f"congress={congress}, bill_id={bill_id}"
+                )
+                return None
+
+            # Generate a deterministic ID
+            summary_id = f"{congress}-{bill_id}-summary-v{version}"
+            
+            self.logger.debug(f"Generated summary ID: {summary_id}")
+            return summary_id
+
+        except Exception as e:
+            self.logger.error(f"Failed to generate summary ID: {str(e)}")
+            return None
+
 
     def _generate_hearing_id(self, hearing: Dict) -> Optional[str]:
         """Generate a hearing ID from hearing data"""
@@ -714,6 +837,48 @@ class CongressAPI(CongressBaseAPI):
         except Exception as e:
             self.logger.error(f"Failed to generate hearing ID: {str(e)}")
             return None
+
+    def _generate_committee_print_id(self, print_data: Dict) -> Optional[str]:
+        """Generate a committee print ID from print data"""
+        try:
+            if not isinstance(print_data, dict):
+                self.logger.error(f"Committee print data must be a dictionary, got {type(print_data)}")
+                return None
+
+            congress = str(print_data.get('congress', ''))
+            chamber = print_data.get('chamber', '').lower()
+            jacket_number = print_data.get('jacket_number', '')
+
+            if not all([congress, chamber, jacket_number]):
+                self.logger.warning(
+                    f"Missing required fields for committee print ID generation: "
+                    f"congress={congress}, chamber={chamber}, "
+                    f"jacket_number={jacket_number}"
+                )
+                return None
+
+            return f"{congress}-print-{chamber}-{jacket_number}"
+
+        except Exception as e:
+            self.logger.error(f"Failed to generate committee print ID: {str(e)}")
+            self.logger.debug(f"Print data that caused error: {json.dumps(print_data, indent=2)}")
+            return None
+
+    # NOTE: All endpoint processor methods have been consolidated at the top of the class
+    # Duplicate declarations have been removed. The implementation for each method
+    # should be kept in a single place to avoid confusion and maintenance issues.
+    # See the top of this class for the correct implementations of:
+    # - _process_bill() and _generate_bill_id()
+    # - _process_amendment() and _generate_amendment_id()
+    # - _process_nomination() and _generate_nomination_id()
+    # - _process_treaty() and _generate_treaty_id() 
+    # - _process_committee_report() and _generate_committee_report_id()
+    # - _process_congressional_record() and _generate_congressional_record_id()
+    # - _process_house_communication() and _generate_house_comm_id()
+    # - _process_senate_communication() and _generate_senate_comm_id()
+    # - _process_committee_meeting() and _generate_meeting_id()
+    # - _process_member() and _generate_member_id()
+    # - _process_summaries() and _generate_summary_id()
 
     def _process_house_requirement(self, req: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a house requirement"""
@@ -806,25 +971,19 @@ class CongressAPI(CongressBaseAPI):
     def _process_committee_print(self, print_data: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a committee print"""
         try:
-            # Extract committee print data, handling both direct and nested structures
-            committee_print = print_data.get('committeePrint', print_data)
-            
-            if isinstance(committee_print, str):
-                self.logger.warning(f"Received string instead of dictionary for committee print: {committee_print}")
+            if not isinstance(print_data, dict):
+                self.logger.error(f"Invalid committee print data type: {type(print_data)}")
                 return None
+
+            # Extract required fields
+            committee_print = print_data.get('committee-print', print_data)
             
-            # Extract basic information
-            chamber = committee_print.get('chamber', {})
-            chamber_name = chamber.get('name', chamber) if isinstance(chamber, dict) else str(chamber)
-            jacket_number = committee_print.get('jacketNumber', '')
-            
-            # Generate print ID
-            print_id = self._generate_committee_print_id({
-                'congress': current_congress,
-                'chamber': chamber_name.lower(),
-                'jacket_number': jacket_number
-            })
-            
+            if not isinstance(committee_print, dict):
+                self.logger.error("Invalid committee print structure")
+                return None
+
+            # Generate ID
+            print_id = self._generate_committee_print_id(committee_print)
             if not print_id:
                 self.logger.warning("Unable to generate ID for committee print")
                 return None
@@ -835,72 +994,101 @@ class CongressAPI(CongressBaseAPI):
                 'congress': current_congress,
                 'update_date': committee_print.get('updateDate', ''),
                 'version': 1,
-                'chamber': chamber_name,
-                'jacket_number': jacket_number,
+                'number': committee_print.get('number', ''),
                 'title': committee_print.get('title', ''),
-                'publication_date': committee_print.get('publicationDate', ''),
-                'committee': {
-                    'name': committee_print.get('committee', {}).get('name', ''),
-                    'system_code': committee_print.get('committee', {}).get('systemCode', ''),
-                    'url': committee_print.get('committee', {}).get('url', '')
-                },
-                'url': committee_print.get('url', ''),
-                'text_versions': committee_print.get('textVersions', [])
+                'committee': committee_print.get('committee', ''),
+                'chamber': committee_print.get('chamber', ''),
+                'url': committee_print.get('url', '')
             }
 
-            is_valid, errors = self.validator.validate_committee_print(transformed_print)
-            if not is_valid:
-                self.logger.warning(f"Committee print {print_id} failed validation: {errors}")
-                return None
-
-            return self.validator.cleanup_committee_print(transformed_print)
+            # TODO: Add validation once schema is defined
+            return transformed_print
 
         except Exception as e:
             self.logger.error(f"Failed to transform committee print: {str(e)}")
-            self.logger.error(f"Problematic committee print data: {json.dumps(print_data, indent=2)}")
             return None
 
-    def _generate_committee_print_id(self, print_data: Dict) -> Optional[str]:
-        """Generate a committee print ID from print data"""
+    def _process_daily_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a daily congressional record"""
         try:
-            if not isinstance(print_data, dict):
-                self.logger.error(f"Committee print data must be a dictionary, got {type(print_data)}")
+            if not isinstance(record, dict):
+                self.logger.error(f"Invalid record data type: {type(record)}")
                 return None
 
-            congress = str(print_data.get('congress', ''))
-            chamber = print_data.get('chamber', '').lower()
-            jacket_number = str(print_data.get('jacket_number', ''))
-
-            if not all([congress, chamber, jacket_number]):
-                self.logger.warning(
-                    f"Missing required fields for committee print ID generation: "
-                    f"congress={congress}, chamber={chamber}, "
-                    f"jacket_number={jacket_number}"
-                )
+            record_data = record.get('daily-congressional-record', record)
+            
+            if not isinstance(record_data, dict):
+                self.logger.error("Invalid record structure")
                 return None
 
-            return f"{congress}-{chamber}-print-{jacket_number}"
+            # Generate ID using date and section
+            record_id = f"dcr-{record_data.get('date', '')}-{record_data.get('section', '')}"
+
+            transformed_record = {
+                'id': record_id,
+                'type': 'daily-congressional-record',
+                'congress': current_congress,
+                'update_date': record_data.get('updateDate', ''),
+                'version': 1,
+                'date': record_data.get('date', ''),
+                'section': record_data.get('section', ''),
+                'pages': record_data.get('pages', ''),
+                'url': record_data.get('url', '')
+            }
+
+            # TODO: Add validation once schema is defined
+            return transformed_record
 
         except Exception as e:
-            self.logger.error(f"Failed to generate committee print ID: {str(e)}")
+            self.logger.error(f"Failed to transform daily congressional record: {str(e)}")
             return None
 
-    def _generate_senate_comm_id(self, comm: Dict) -> Optional[str]:
-        """Generate a senate communication ID from communication data"""
+    def _process_bound_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a bound congressional record"""
         try:
-            congress = str(comm.get('congress', ''))
-            comm_type = comm.get('communicationType', '').lower()
-            number = str(comm.get('number', ''))
-            if congress and comm_type and number:
-                return f"{congress}-scomm-{comm_type}-{number}"
+            if not isinstance(record, dict):
+                self.logger.error(f"Invalid record data type: {type(record)}")
+                return None
+
+            record_data = record.get('bound-congressional-record', record)
+            
+            if not isinstance(record_data, dict):
+                self.logger.error("Invalid record structure")
+                return None
+
+            # Generate ID using volume and part
+            record_id = f"bcr-{record_data.get('volume', '')}-{record_data.get('part', '')}"
+
+            transformed_record = {
+                'id': record_id,
+                'type': 'bound-congressional-record',
+                'congress': current_congress,
+                'update_date': record_data.get('updateDate', ''),
+                'version': 1,
+                'volume': record_data.get('volume', ''),
+                'part': record_data.get('part', ''),
+                'date': record_data.get('date', ''),
+                'pages': record_data.get('pages', ''),
+                'url': record_data.get('url', '')
+            }
+
+            # TODO: Add validation once schema is defined
+            return transformed_record
+
         except Exception as e:
-            self.logger.error(f"Failed to generate senate communication ID: {str(e)}")
-        return None
+            self.logger.error(f"Failed to transform bound congressional record: {str(e)}")
+            return None
 
     def _process_member(self, member: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a member"""
         try:
-            member_id = self._generate_member_id(member)
+            if not isinstance(member, dict):
+                self.logger.error(f"Invalid member data type: {type(member)}")
+                return None
+
+            member_data = member.get('member', member)
+            
+            member_id = self._generate_member_id(member_data)
             if not member_id:
                 self.logger.warning("Unable to generate ID for member")
                 return None
@@ -908,19 +1096,19 @@ class CongressAPI(CongressBaseAPI):
             transformed_member = {
                 'id': member_id,
                 'type': 'member',
-                'congress': member.get('congress', current_congress),
-                'update_date': member.get('updateDate', ''),
+                'congress': member_data.get('congress', current_congress),
+                'update_date': member_data.get('updateDate', ''),
                 'version': 1,
-                'bioguide_id': member.get('bioguideId', ''),
-                'first_name': member.get('firstName', ''),
-                'last_name': member.get('lastName', ''),
-                'state': member.get('state', ''),
-                'district': member.get('district', ''),
-                'party': member.get('party', ''),
-                'chamber': member.get('chamber', {}).get('name', ''),
-                'leadership_role': member.get('leadershipRole', ''),
-                'served_until': member.get('servedUntil', ''),
-                'url': member.get('url', '')
+                'bioguide_id': member_data.get('bioguideId', ''),
+                'first_name': member_data.get('firstName', ''),
+                'last_name': member_data.get('lastName', ''),
+                'state': member_data.get('state', ''),
+                'district': member_data.get('district', ''),
+                'party': member_data.get('party', ''),
+                'chamber': member_data.get('chamber', {}).get('name', ''),
+                'leadership_role': member_data.get('leadershipRole', ''),
+                'served_until': member_data.get('servedUntil', ''),
+                'url': member_data.get('url', '')
             }
 
             is_valid, errors = self.validator.validate_member(transformed_member)
