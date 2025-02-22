@@ -48,7 +48,8 @@ class DataValidator:
             'summaries': self.validate_summary,
             'committee-print': self.validate_committee_print,
             'daily-congressional-record': self.validate_congressional_record_daily,
-            'bound-congressional-record': self.validate_bound_congressional_record
+            'bound-congressional-record': self.validate_bound_congressional_record,
+            'committee-meeting': self.validate_committee_meeting
         }
 
         if data_type in validators:
@@ -442,6 +443,12 @@ class DataValidator:
             return self.cleanup_summary(data)
         elif data_type == 'committee-print':
             return self.cleanup_committee_print(data)
+        elif data_type == 'committee-meeting':
+            return self.cleanup_committee_meeting(data)
+        elif data_type == 'daily-congressional-record':
+            return self.cleanup_daily_congressional_record(data)
+        elif data_type == 'bound-congressional-record':
+            return self.cleanup_bound_congressional_record(data)
         return data
 
     def cleanup_bill(self, bill: Dict[str, Any]) -> Dict[str, Any]:
@@ -804,7 +811,7 @@ class DataValidator:
             try:
                 congress_num = int(member['congress'])
                 if congress_num < 1 or congress_num > 150:
-                    errors.append(f"Invalid congress number: {congress_num}")
+                    errors.append(f"Invalid congress number:{congress_num}")
             except (ValueError, TypeError):
                 errors.append("Congress must be a valid number")
 
@@ -1012,5 +1019,161 @@ class DataValidator:
         # Ensure text_versions is a list
         if 'text_versions' not in cleaned or not isinstance(cleaned['text_versions'], list):
             cleaned['text_versions'] = []
+
+        return cleaned
+    def validate_committee_meeting(self, meeting: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate committee meeting data structure"""
+        errors = []
+        required_fields = ['id', 'congress', 'update_date', 'committee', 'date', 'meeting_type']
+
+        for field in required_fields:
+            if field not in meeting:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            # Congress number validation
+            try:
+                congress_num = int(meeting['congress'])
+                if congress_num < 1 or congress_num > 150:
+                    errors.append(f"Invalid congress number: {congress_num}")
+            except (ValueError, TypeError):
+                errors.append("Congress must be a valid number")
+
+            # Date validations
+            for date_field in ['update_date', 'date']:
+                if not self._is_valid_date(meeting[date_field]):
+                    errors.append(f"Invalid {date_field} format: {meeting[date_field]}")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('committee-meeting', is_valid)
+        return is_valid, errors
+
+    def cleanup_committee_meeting(self, meeting: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize committee meeting data"""
+        cleaned = meeting.copy()
+
+        # Convert congress to integer
+        if 'congress' in cleaned:
+            try:
+                cleaned['congress'] = int(cleaned['congress'])
+            except (ValueError, TypeError):
+                self.logger.warning(f"Could not convert congress to integer: {cleaned['congress']}")
+
+        # Normalize text fields
+        for field in ['title', 'committee', 'subcommittee', 'meeting_type', 'location', 'description']:
+            if field in cleaned:
+                cleaned[field] = ' '.join(cleaned[field].split())
+
+        # Ensure documents is a list
+        if 'documents' not in cleaned or not isinstance(cleaned['documents'], list):
+            cleaned['documents'] = []
+
+        return cleaned
+
+    def validate_daily_congressional_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate daily congressional record data structure"""
+        errors = []
+        required_fields = ['id', 'congress', 'update_date', 'chamber', 'date']
+
+        for field in required_fields:
+            if field not in record:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            # Congress number validation
+            try:
+                congress_num = int(record['congress'])
+                if congress_num < 1 or congress_num > 150:
+                    errors.append(f"Invalid congress number: {congress_num}")
+            except (ValueError, TypeError):
+                errors.append("Congress must be a valid number")
+
+            # Date validations
+            for date_field in ['update_date', 'date']:
+                if not self._is_valid_date(record[date_field]):
+                    errors.append(f"Invalid {date_field} format: {record[date_field]}")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('daily-congressional-record', is_valid)
+        return is_valid, errors
+
+    def cleanup_daily_congressional_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize daily congressional record data"""
+        cleaned = record.copy()
+
+        # Convert congress to integer
+        if 'congress' in cleaned:
+            try:
+                cleaned['congress'] = int(cleaned['congress'])
+            except (ValueError, TypeError):
+                self.logger.warning(f"Could not convert congress to integer: {cleaned['congress']}")
+
+        # Normalize text fields
+        for field in ['chamber', 'description']:
+            if field in cleaned:
+                cleaned[field] = ' '.join(cleaned[field].split())
+
+        # Ensure pages is a list
+        if 'pages' not in cleaned or not isinstance(cleaned['pages'], list):
+            cleaned['pages'] = []
+
+        return cleaned
+
+    def validate_bound_congressional_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate bound congressional record data structure"""
+        errors = []
+        required_fields = ['id', 'congress', 'update_date', 'volume', 'date']
+
+        for field in required_fields:
+            if field not in record:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            # Congress number validation
+            try:
+                congress_num = int(record['congress'])
+                if congress_num < 1 or congress_num > 150:
+                    errors.append(f"Invalid congress number: {congress_num}")
+            except (ValueError, TypeError):
+                errors.append("Congress must be a valid number")
+
+            # Date validation
+            for date_field in ['update_date', 'date']:
+                if not self._is_valid_date(record[date_field]):
+                    errors.append(f"Invalid {date_field} format: {record[date_field]}")
+
+            # Volume validation
+            if 'volume' in record:
+                try:
+                    vol_num = int(record['volume'])
+                    if vol_num < 1:
+                        errors.append("Volume number must be positive")
+                except (ValueError, TypeError):
+                    errors.append("Volume must be a valid number")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('bound-congressional-record', is_valid)
+        return is_valid, errors
+
+    def cleanup_bound_congressional_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize bound congressional record data"""
+        cleaned = record.copy()
+
+        # Convert numeric fields
+        for field in ['congress', 'volume']:
+            if field in cleaned:
+                try:
+                    cleaned[field] = int(cleaned[field])
+                except (ValueError, TypeError):
+                    self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
+
+        # Normalize text fields
+        for field in ['description']:
+            if field in cleaned:
+                cleaned[field] = ' '.join(cleaned[field].split())
+
+        # Ensure pages is a list
+        if 'pages' not in cleaned or not isinstance(cleaned['pages'], list):
+            cleaned['pages'] = []
 
         return cleaned
