@@ -388,10 +388,20 @@ class CongressAPI(CongressBaseAPI):
     def _process_committee(self, committee: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a committee"""
         try:
+            # Initial type validation
+            if not isinstance(committee, dict):
+                self.logger.error(f"Invalid committee data type: {type(committee)}, value: {committee}")
+                return None
+                
             # Handle both direct and nested committee data structures
             committee_data = committee.get('committee', committee)
             if isinstance(committee_data, str):
                 self.logger.error(f"Received string instead of dictionary for committee: {committee_data}")
+                return None
+            
+            # Validate committee_data is a dict
+            if not isinstance(committee_data, dict):
+                self.logger.error(f"Invalid committee_data type: {type(committee_data)}, value: {committee_data}")
                 return None
 
             # Extract and normalize committee data
@@ -407,7 +417,7 @@ class CongressAPI(CongressBaseAPI):
                 'name': parent_committee.get('name', ''),
                 'system_code': parent_committee.get('systemCode', ''),
                 'url': parent_committee.get('url', '')
-            } if parent_committee else {}
+            } if parent_committee and isinstance(parent_committee, dict) else {}
 
             transformed_committee = {
                 'id': committee_id,
@@ -420,8 +430,20 @@ class CongressAPI(CongressBaseAPI):
                 'committee_type': committee_data.get('committeeTypeCode', ''),
                 'system_code': system_code,
                 'parent_committee': parent_info,
+                'subcommittees': [
+                    {
+                        'name': subcomm.get('name', ''),
+                        'system_code': subcomm.get('systemCode', ''),
+                        'url': subcomm.get('url', '')
+                    }
+                    for subcomm in committee_data.get('subcommittees', [])
+                    if isinstance(subcomm, dict)
+                ] if committee_data.get('subcommittees') else [],
                 'url': committee_data.get('url', '')
             }
+            
+            # Log the transformed data for debugging
+            self.logger.debug(f"Transformed committee data: {json.dumps(transformed_committee, indent=2)}")
 
             is_valid, errors = self.validator.validate_committee(transformed_committee)
             if not is_valid:
@@ -444,34 +466,50 @@ class CongressAPI(CongressBaseAPI):
                 self.logger.error(f"Received string instead of dictionary for hearing: {hearing_data}")
                 return None
 
-            # Generate hearing ID
+            # Extract required fields with proper error handling
+            congress = int(hearing_data.get('congress', current_congress))
+            chamber = hearing_data.get('chamber', '').lower()
+            committee_data = hearing_data.get('committee', {})
+            date = hearing_data.get('date', '')
+            
+            # Generate hearing ID with all required fields
             hearing_id = self._generate_hearing_id({
-                'congress': hearing_data.get('congress', current_congress),
-                'chamber': hearing_data.get('chamber', ''),
-                'committee': hearing_data.get('committee', {}).get('systemCode', ''),
-                'date': hearing_data.get('date', '')
+                'congress': congress,
+                'chamber': chamber,
+                'committee': committee_data.get('systemCode', ''),
+                'date': date
             })
 
             if not hearing_id:
-                self.logger.error("Failed to generate hearing ID")
+                self.logger.error("Failed to generate hearing ID - missing required fields")
+                self.logger.error(f"Raw hearing data: {json.dumps(hearing_data, indent=2)}")
                 return None
 
             transformed_hearing = {
                 'id': hearing_id,
                 'type': 'hearing',
-                'congress': hearing_data.get('congress', current_congress),
+                'congress': congress,
                 'update_date': hearing_data.get('updateDate', ''),
                 'version': 1,
-                'chamber': hearing_data.get('chamber', ''),
-                'date': hearing_data.get('date', ''),
+                'chamber': chamber,
+                'date': date,
                 'time': hearing_data.get('time', ''),
                 'location': hearing_data.get('location', ''),
                 'title': hearing_data.get('title', ''),
                 'committee': {
-                    'name': hearing_data.get('committee', {}).get('name', ''),
-                    'system_code': hearing_data.get('committee', {}).get('systemCode', ''),
-                    'url': hearing_data.get('committee', {}).get('url', '')
-                },
+                    'name': committee_data.get('name', ''),
+                    'system_code': committee_data.get('systemCode', ''),
+                    'url': committee_data.get('url', '')
+                } if committee_data else {},
+                'subcommittees': [
+                    {
+                        'name': subcomm.get('name', ''),
+                        'system_code': subcomm.get('systemCode', ''),
+                        'url': subcomm.get('url', '')
+                    }
+                    for subcomm in hearing_data.get('subcommittees', [])
+                    if isinstance(subcomm, dict)
+                ] if hearing_data.get('subcommittees') else [],
                 'url': hearing_data.get('url', '')
             }
 
@@ -496,14 +534,27 @@ class CongressAPI(CongressBaseAPI):
             committee = hearing.get('committee', '')
             date = hearing.get('date', '')
             
-            if congress and chamber and committee and date:
-                date_clean = re.sub(r'[^0-9]', '', date)
-                return f"{congress}-{chamber}-{committee}-{date_clean}"
+            if not all([congress, chamber, committee, date]):
+                missing_fields = []
+                if not congress: missing_fields.append('congress')
+                if not chamber: missing_fields.append('chamber')
+                if not committee: missing_fields.append('committee')
+                if not date: missing_fields.append('date')
+                self.logger.warning(f"Missing required fields for hearing ID generation: {', '.join(missing_fields)}")
+                return None
+            
+            # Clean date to remove non-numeric characters
+            date_clean = re.sub(r'[^0-9]', '', date)
+            
+            # Generate final ID
+            hearing_id = f"{congress}-{chamber}-{committee}-{date_clean}"
+            self.logger.debug(f"Generated hearing ID: {hearing_id}")
+            return hearing_id
                 
         except Exception as e:
             self.logger.error(f"Failed to generate hearing ID: {str(e)}")
-            self.logger.error(f"Hearing data: {json.dumps(hearing, indent=2)}")
-        return None
+            self.logger.error(f"Raw hearing data: {json.dumps(hearing, indent=2)}")
+            return None
 
     def _process_treaty(self, treaty: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a treaty"""
@@ -526,15 +577,30 @@ class CongressAPI(CongressBaseAPI):
             transformed_treaty = {
                 'id': treaty_id,
                 'type': 'treaty',
-                'congress': treaty_data.get('congress', current_congress),
+                'congress': int(treaty_data.get('congress', current_congress)),
                 'update_date': treaty_data.get('updateDate', ''),
                 'version': 1,
-                'treaty_number': treaty_data.get('treatyNumber', ''),
+                'treaty_number': str(treaty_data.get('treatyNumber', '')),
                 'description': treaty_data.get('description', ''),
+                'country': treaty_data.get('country', ''),
+                'subject': treaty_data.get('subject', ''),
+                'status': treaty_data.get('status', ''),
+                'received_date': treaty_data.get('receivedDate', ''),
                 'latest_action': {
-                    'text': treaty_data.get('latestAction', {}).get('text', ''),
-                    'action_date': treaty_data.get('latestAction', {}).get('actionDate', '')
+                    'text': treaty_data.get('latestAction', {}).get('text', '') if isinstance(treaty_data.get('latestAction'), dict) else '',
+                    'action_date': treaty_data.get('latestAction', {}).get('actionDate', '') if isinstance(treaty_data.get('latestAction'), dict) else ''
                 },
+                'committees': [
+                    {
+                        'name': committee.get('name', ''),
+                        'system_code': committee.get('systemCode', ''),
+                        'chamber': committee.get('chamber', ''),
+                        'type': committee.get('type', ''),
+                        'url': committee.get('url', '')
+                    }
+                    for committee in treaty_data.get('committees', [])
+                    if isinstance(committee, dict)
+                ] if treaty_data.get('committees') else [],
                 'url': treaty_data.get('url', '')
             }
 
@@ -684,23 +750,21 @@ class CongressAPI(CongressBaseAPI):
                 self.logger.error("Failed to generate bill ID")
                 return None
 
-            # Log raw data for debugging
-            self.logger.debug(f"Processing bill data: {json.dumps(bill_data, indent=2)}")
-
+            # Transform bill data with additional error checking
             transformed_bill = {
                 'id': bill_id,
                 'type': 'bill',
-                'congress': bill_data.get('congress', current_congress),
+                'congress': int(bill_data.get('congress', current_congress)),
                 'update_date': bill_data.get('updateDate', ''),
                 'version': 1,
-                'bill_type': bill_data.get('type', ''),
-                'number': bill_data.get('number', ''),
+                'bill_type': bill_data.get('type', '').lower(),
+                'number': str(bill_data.get('number', '')),
                 'title': bill_data.get('title', ''),
                 'origin_chamber': bill_data.get('originChamber', ''),
                 'origin_chamber_code': bill_data.get('originChamberCode', ''),
                 'latest_action': {
-                    'text': bill_data.get('latestAction', {}).get('text', ''),
-                    'action_date': bill_data.get('latestAction', {}).get('actionDate', '')
+                    'text': bill_data.get('latestAction', {}).get('text', '') if isinstance(bill_data.get('latestAction'), dict) else '',
+                    'action_date': bill_data.get('latestAction', {}).get('actionDate', '') if isinstance(bill_data.get('latestAction'), dict) else ''
                 },
                 'committees': [
                     {
@@ -712,11 +776,12 @@ class CongressAPI(CongressBaseAPI):
                     }
                     for committee in bill_data.get('committees', [])
                     if isinstance(committee, dict)
-                ],
-                'cosponsors_count': bill_data.get('cosponsorsCount', 0),
+                ] if bill_data.get('committees') else [],
+                'cosponsors_count': int(bill_data.get('cosponsorsCount', 0)),
                 'url': bill_data.get('url', '')
             }
 
+            # Validate the transformed bill
             is_valid, errors = self.validator.validate_bill(transformed_bill)
             if not is_valid:
                 self.logger.error(f"Bill {bill_id} failed validation: {errors}")
@@ -752,21 +817,34 @@ class CongressAPI(CongressBaseAPI):
             transformed_nomination = {
                 'id': nomination_id,
                 'type': 'nomination',
-                'congress': nomination_data.get('congress', current_congress),
+                'congress': int(nomination_data.get('congress', current_congress)),
                 'update_date': nomination_data.get('updateDate', ''),
                 'version': 1,
-                'number': nomination_data.get('number', ''),
+                'number': str(nomination_data.get('number', '')),
                 'part_number': nomination_data.get('partNumber', ''),
                 'description': nomination_data.get('description', ''),
+                'nominee': nomination_data.get('nominee', ''),
+                'position': nomination_data.get('position', ''),
                 'organization': nomination_data.get('organization', ''),
                 'nomination_type': {
                     'is_civilian': nomination_data.get('nominationType', {}).get('isCivilian', True)
                 },
                 'received_date': nomination_data.get('receivedDate', ''),
                 'latest_action': {
-                    'text': nomination_data.get('latestAction', {}).get('text', ''),
-                    'action_date': nomination_data.get('latestAction', {}).get('actionDate', '')
+                    'text': nomination_data.get('latestAction', {}).get('text', '') if isinstance(nomination_data.get('latestAction'), dict) else '',
+                    'action_date': nomination_data.get('latestAction', {}).get('actionDate', '') if isinstance(nomination_data.get('latestAction'), dict) else ''
                 },
+                'committees': [
+                    {
+                        'name': committee.get('name', ''),
+                        'system_code': committee.get('systemCode', ''),
+                        'chamber': committee.get('chamber', ''),
+                        'type': committee.get('type', ''),
+                        'url': committee.get('url', '')
+                    }
+                    for committee in nomination_data.get('committees', [])
+                    if isinstance(committee, dict)
+                ] if nomination_data.get('committees') else [],
                 'url': nomination_data.get('url', '')
             }
 
@@ -790,8 +868,10 @@ class CongressAPI(CongressBaseAPI):
             number = str(nomination.get('number', ''))
             part = str(nomination.get('part', ''))
             
-            if congress and number and part:
-                return f"{congress}-nom-{number}-{part}"
+            if congress and number:
+                if part:
+                    return f"{congress}-nom-{number}-{part}"
+                return f"{congress}-nom-{number}"
                 
         except Exception as e:
             self.logger.error(f"Failed to generate nomination ID: {str(e)}")
