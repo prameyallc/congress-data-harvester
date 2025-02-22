@@ -29,10 +29,53 @@ class DynamoHandler:
 
                 if not any(idx['IndexName'] == required_index for idx in indexes):
                     self.logger.warning(f"Table {self.table_name} exists but missing required index {required_index}")
-                    # Instead of deleting and recreating, just use existing table
-                    self.table = self.dynamodb.Table(self.table_name)
-                    self.logger.info(f"Using existing table without index {required_index}")
-                    return
+                    # Add the missing index to the existing table
+                    self.logger.info(f"Adding required index {required_index} to existing table...")
+                    try:
+                        # Check if table uses PAY_PER_REQUEST billing
+                        billing_mode = table_desc['Table'].get('BillingModeSummary', {}).get('BillingMode', 'PROVISIONED')
+                        self.logger.info(f"Table billing mode: {billing_mode}")
+
+                        # Prepare the index update request
+                        index_update = {
+                            'Create': {
+                                'IndexName': required_index,
+                                'KeySchema': [
+                                    {'AttributeName': 'type', 'KeyType': 'HASH'},
+                                    {'AttributeName': 'update_date', 'KeyType': 'RANGE'}
+                                ],
+                                'Projection': {'ProjectionType': 'ALL'}
+                            }
+                        }
+
+                        # Only add ProvisionedThroughput if not using PAY_PER_REQUEST
+                        if billing_mode != 'PAY_PER_REQUEST':
+                            index_update['Create']['ProvisionedThroughput'] = {
+                                'ReadCapacityUnits': 5,
+                                'WriteCapacityUnits': 5
+                            }
+
+                        dynamodb_client.update_table(
+                            TableName=self.table_name,
+                            AttributeDefinitions=[
+                                {'AttributeName': 'type', 'AttributeType': 'S'},
+                                {'AttributeName': 'update_date', 'AttributeType': 'S'}
+                            ],
+                            GlobalSecondaryIndexUpdates=[index_update]
+                        )
+
+                        self.logger.info("Waiting for index creation to complete...")
+                        waiter = dynamodb_client.get_waiter('table_exists')
+                        waiter.wait(
+                            TableName=self.table_name,
+                            WaiterConfig={'Delay': 5, 'MaxAttempts': 20}
+                        )
+                    except ClientError as e:
+                        if 'AccessDeniedException' in str(e):
+                            self.logger.warning(f"Unable to add index {required_index} due to permissions. Using table without index.")
+                        else:
+                            self.logger.error(f"Failed to add index: {str(e)}")
+                            raise
 
                 self.table = self.dynamodb.Table(self.table_name)
                 self.logger.info(f"Successfully connected to table {self.table_name}")
@@ -273,8 +316,10 @@ class DynamoHandler:
                             if 'type' not in item:
                                 item['type'] = 'unknown'
 
+                            self.logger.info(f"Attempting to store item of type {item.get('type')} with ID: {item.get('id')}")
                             batch.put_item(Item=item)
                             successful_items += 1
+                            self.logger.info(f"Successfully stored item with ID: {item.get('id')}")
 
                         except Exception as e:
                             self.logger.error(f"Failed to write item {item.get('id', 'unknown')}: {str(e)}")

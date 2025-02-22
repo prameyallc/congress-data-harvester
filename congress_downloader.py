@@ -70,16 +70,45 @@ def process_date_chunk(api_client: CongressAPI, db_handler: DynamoHandler,
             date_str = date.strftime('%Y-%m-%d')
             logger.info(f"Processing date: {date_str}")
 
+            # Get raw data and log it for debugging
             data = api_client.get_data_for_date(date)
             if not data:
                 logger.info(f"No data found for date {date_str}")
                 continue
+
+            # Log data statistics before storage
+            type_counts = {}
+            for item in data:
+                item_type = item.get('type', 'unknown')
+                type_counts[item_type] = type_counts.get(item_type, 0) + 1
+
+            logger.info(f"Retrieved data for {date_str}:")
+            for item_type, count in type_counts.items():
+                logger.info(f"  - {item_type}: {count} items")
+
+            # If we have committee data, log a sample for debugging
+            committee_items = [item for item in data if item.get('type') == 'committee']
+            if committee_items:
+                logger.info(f"Sample committee data structure:")
+                logger.info(f"{json.dumps(committee_items[0], indent=2)}")
 
             successful_items, failed_items = db_handler.batch_store_items(data)
             total_items += successful_items
 
             if failed_items:
                 logger.warning(f"{len(failed_items)} items failed for {date_str}")
+                logger.warning("Failed items by type:")
+                failed_by_type = {}
+                for item in failed_items:
+                    item_type = item['item'].get('type', 'unknown')
+                    failed_by_type[item_type] = failed_by_type.get(item_type, 0) + 1
+                    if item_type == 'committee':
+                        logger.warning(f"Failed committee item: {json.dumps(item['item'], indent=2)}")
+                        logger.warning(f"Error: {item['error']}")
+
+                for item_type, count in failed_by_type.items():
+                    logger.warning(f"  - {item_type}: {count} failed items")
+
                 chunk_failed_dates.append({
                     'date': date,
                     'failed_items': failed_items
