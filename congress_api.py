@@ -11,6 +11,7 @@ from data_validator import DataValidator
 from typing import Dict, List, Any, Optional
 import hashlib
 import re
+import json
 
 class CongressBaseAPI:
     """Base class for Congress.gov API interactions"""
@@ -70,8 +71,13 @@ class CongressBaseAPI:
         start_time = time.time()
 
         try:
+            self.logger.debug(f"Making request to {url} with params: {json.dumps({k: v for k, v in params.items() if k != 'api_key'}, indent=2)}")
             response = self.session.get(url, params=params, timeout=self.timeout)
             duration = time.time() - start_time
+
+            self.logger.debug(f"Response status code: {response.status_code}")
+            self.logger.debug(f"Response headers: {dict(response.headers)}")
+
             metrics.track_api_request(
                 endpoint=endpoint,
                 status_code=response.status_code,
@@ -80,7 +86,11 @@ class CongressBaseAPI:
 
             if response.status_code == 200:
                 self.consecutive_errors = 0
-                return response.json()
+                response_json = response.json()
+                self.logger.info(f"Successful response from {endpoint}")
+                self.logger.debug(f"Response data: {json.dumps(response_json, indent=2)}")
+                self.logger.debug(f"Response data keys: {list(response_json.keys())}")
+                return response_json
 
             if response.status_code == 429:
                 self.consecutive_errors += 1
@@ -90,14 +100,14 @@ class CongressBaseAPI:
                 raise Exception("Rate limit exceeded")
 
             if response.status_code == 403:
-                self.logger.error("API authentication failed")
-                raise Exception("API authentication failed")
+                self.logger.error(f"API authentication failed. Please verify API key. URL: {url}")
+                raise Exception("API authentication failed - please verify API key")
 
             if response.status_code == 404:
                 self.logger.error(f"API endpoint not found: {url}")
                 raise Exception(f"API endpoint not found: {url}")
 
-            self.logger.error(f"Unexpected status code {response.status_code}: {response.text}")
+            self.logger.error(f"Unexpected status code {response.status_code} for {url}: {response.text}")
             response.raise_for_status()
 
         except requests.exceptions.Timeout as e:
@@ -119,7 +129,7 @@ class CongressBaseAPI:
                 duration=duration
             )
             self.consecutive_errors += 1
-            self.logger.error(f"Request failed: {str(e)}")
+            self.logger.error(f"Request failed for {url}: {str(e)}")
             raise Exception(f"Request failed: {str(e)}")
 
     def get_available_endpoints(self) -> Dict[str, Any]:
@@ -137,11 +147,19 @@ class CongressBaseAPI:
             for endpoint in standard_endpoints:
                 try:
                     self.logger.info(f"Checking endpoint: {endpoint}")
-                    response = self._make_request(endpoint, {
+                    # Test the committee endpoint with more specific parameters
+                    params = {
                         'limit': 1,
                         'format': 'json',
                         'offset': 0
-                    })
+                    }
+                    if endpoint == 'committee':
+                        params.update({
+                            'congress': self.get_current_congress(),
+                            'chamber': 'house'  # Try with a specific chamber
+                        })
+                    
+                    response = self._make_request(endpoint, params)
 
                     if response:
                         available_endpoints[endpoint] = {
@@ -151,6 +169,7 @@ class CongressBaseAPI:
                             'response_keys': list(response.keys()) if isinstance(response, dict) else []
                         }
                         self.logger.info(f"Found active endpoint: {endpoint}")
+                        self.logger.debug(f"Response structure for {endpoint}: {json.dumps(response, indent=2)}")
                 except Exception as e:
                     self.logger.warning(f"Endpoint {endpoint} error: {str(e)}")
                     continue
@@ -159,6 +178,7 @@ class CongressBaseAPI:
                 self.logger.error("No endpoints available or accessible")
                 raise Exception("No endpoints available or accessible")
 
+            self.logger.info(f"Available endpoints: {list(available_endpoints.keys())}")
             return available_endpoints
         except Exception as e:
             self.logger.error(f"Failed to get available endpoints: {str(e)}")
@@ -247,16 +267,54 @@ class CongressAPI(CongressBaseAPI):
                 'offset': offset,
                 'limit': limit,
                 'format': 'json',
-                'sort': 'updateDate+desc',
                 'fromDateTime': f"{date_str}T00:00:00Z",
                 'toDateTime': f"{date_str}T23:59:59Z"
             }
 
-            self.logger.info(f"Fetching {endpoint} for date {date_str} (offset: {offset})")
-            response_data = self._make_request(endpoint, params)
-            items = response_data.get(f'{endpoint}s', [])
+            # Add specific parameters for committee endpoint
+            if endpoint == 'committee':
+                params.update({
+                    'congress': current_congress,
+                    'chamber': 'house,senate',  # Request both chambers
+                    'limit': 100  # Increase limit for committees
+                })
 
+            self.logger.info(f"Fetching {endpoint} for date {date_str} (offset: {offset})")
+            self.logger.debug(f"Request parameters: {json.dumps(params, indent=2)}")
+            
+            response_data = self._make_request(endpoint, params)
+            
+            # Add detailed logging for API response
+            self.logger.debug(f"Raw API response for {endpoint}: {json.dumps(response_data, indent=2)}")
+            
+            # Get items from response, handling both singular and plural keys
+            items = []
+            possible_keys = [
+                'committees',  # Standard plural form
+                'committee',   # Standard singular form
+                f'{endpoint}s',  # Dynamic plural form
+                endpoint,        # Dynamic singular form
+                'results',      # Generic results key
+                'data',         # Alternative data key
+                endpoint.replace('-', ''),  # Handle hyphenated endpoints
+                f"{endpoint.replace('-', '')}s"  # Plural form of hyphenated endpoints
+            ]
+            
+            # Log all available response keys for debugging
+            self.logger.debug(f"Response contains keys: {list(response_data.keys())}")
+            self.logger.debug(f"Looking for items in these possible keys: {possible_keys}")
+            
+            for key in possible_keys:
+                if key in response_data:
+                    items = response_data[key]
+                    self.logger.info(f"Found {len(items)} items in '{key}' key")
+                    # Log sample item structure
+                    if items:
+                        self.logger.debug(f"Sample item structure: {json.dumps(items[0], indent=2)}")
+                    break
+            
             if not items:
+                self.logger.warning(f"No items found in response. Available keys: {list(response_data.keys())}")
                 return []
 
             processed_items = []
@@ -265,10 +323,14 @@ class CongressAPI(CongressBaseAPI):
                     processed_item = self._process_item(endpoint, item, current_congress)
                     if processed_item:
                         processed_items.append(processed_item)
+                    else:
+                        self.logger.warning(f"Failed to process {endpoint} item: {json.dumps(item, indent=2)}")
                 except Exception as e:
                     self.logger.error(f"Failed to process {endpoint} item: {str(e)}")
+                    self.logger.error(f"Problematic item: {json.dumps(item, indent=2)}")
                     continue
 
+            self.logger.info(f"Successfully processed {len(processed_items)} out of {len(items)} {endpoint} items")
             return processed_items
 
         except Exception as e:
@@ -307,58 +369,62 @@ class CongressAPI(CongressBaseAPI):
     def _process_committee(self, committee: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a committee"""
         try:
+            # Log raw committee data for debugging
+            self.logger.debug(f"Raw committee data: {json.dumps(committee, indent=2)}")
+            
             # Handle case where committee is a string
             if isinstance(committee, str):
                 self.logger.warning(f"Received string instead of dictionary for committee: {committee}")
                 return None
 
-            # Extract committee details from the response structure
-            committee_details = committee.get('committee', committee)
-            if isinstance(committee_details, dict):
-                committee_type = committee_details.get('type', committee_details.get('committeeTypeCode', '')).lower()
-                chamber = committee_details.get('chamber', {})
-                chamber_code = chamber.get('code', '') if isinstance(chamber, dict) else chamber
-                chamber_name = chamber_code.title() if isinstance(chamber_code, str) else ''
-                name = committee_details.get('name', '')
-            else:
-                # If committee_details is not a dict, use the original committee object
-                committee_type = committee.get('type', committee.get('committeeTypeCode', '')).lower()
-                chamber = committee.get('chamber', {})
-                chamber_code = chamber.get('code', '') if isinstance(chamber, dict) else chamber
-                chamber_name = chamber_code.title() if isinstance(chamber_code, str) else ''
-                name = committee.get('name', '')
-
-            # Prepare data for ID generation
-            committee_data = {
-                'congress': current_congress,
-                'chamber': {'code': chamber_code},
-                'type': committee_type,
-                'name': name
-            }
+            # Extract committee data, handling both direct and nested structures
+            committee_data = committee.get('committee', committee)
             
-            committee_id = self._generate_committee_id(committee_data)
+            # Get the basic committee information with detailed logging
+            committee_type = committee_data.get('committeeTypeCode', committee_data.get('type', '')).lower()
+            chamber = committee_data.get('chamber', committee_data.get('originChamber', ''))
+            chamber_name = chamber.get('name', chamber) if isinstance(chamber, dict) else str(chamber).title()
+            name = committee_data.get('name', committee_data.get('committeeName', ''))
+            
+            self.logger.debug(f"Extracted committee fields: type={committee_type}, chamber={chamber_name}, name={name}")
+            
+            # Generate committee ID
+            committee_id = self._generate_committee_id({
+                'congress': current_congress,
+                'chamber': chamber_name.lower() if chamber_name else '',
+                'committeeTypeCode': committee_type,
+                'name': name
+            })
             
             if not committee_id:
                 self.logger.warning("Unable to generate ID for committee")
+                self.logger.debug("ID generation failed with data: " + 
+                                f"congress={current_congress}, " +
+                                f"chamber={chamber_name}, " +
+                                f"type={committee_type}, " +
+                                f"name={name}")
                 return None
 
             transformed_committee = {
                 'id': committee_id,
                 'type': 'committee',
                 'congress': current_congress,
-                'update_date': committee.get('updateDate', ''),
+                'update_date': committee_data.get('updateDate', ''),
                 'version': 1,
                 'name': name,
                 'chamber': chamber_name,
                 'committee_type': committee_type,
-                'system_code': committee.get('systemCode', ''),
+                'system_code': committee_data.get('systemCode', ''),
                 'parent_committee': {
-                    'name': committee.get('parent', {}).get('name', ''),
-                    'system_code': committee.get('parent', {}).get('systemCode', ''),
-                    'url': committee.get('parent', {}).get('url', '')
-                } if committee.get('parent') else {},
-                'url': committee.get('url', '')
+                    'name': committee_data.get('parent', {}).get('name', ''),
+                    'system_code': committee_data.get('parent', {}).get('systemCode', ''),
+                    'url': committee_data.get('parent', {}).get('url', '')
+                } if committee_data.get('parent') else {},
+                'url': committee_data.get('url', '')
             }
+
+            # Log the transformation details
+            self.logger.debug(f"Transformed committee: {json.dumps(transformed_committee, indent=2)}")
 
             is_valid, errors = self.validator.validate_committee(transformed_committee)
             if not is_valid:
@@ -369,39 +435,52 @@ class CongressAPI(CongressBaseAPI):
 
         except Exception as e:
             self.logger.error(f"Failed to transform committee: {str(e)}")
+            self.logger.error(f"Problematic committee data: {json.dumps(committee, indent=2)}")
             return None
 
     def _generate_committee_id(self, committee: Dict) -> Optional[str]:
         """Generate a committee ID from committee data"""
         try:
-            # Type checking
+            # Type checking with detailed logging
             if not isinstance(committee, dict):
                 self.logger.error(f"Committee data must be a dictionary, got {type(committee)}")
+                self.logger.debug(f"Invalid committee data: {committee}")
                 return None
 
-            # Safe get with explicit empty string defaults
+            # Get direct values with fallbacks
             congress = str(committee.get('congress', ''))
-            chamber = committee.get('chamber', {})
-            chamber_code = chamber.get('code', '') if isinstance(chamber, dict) else ''
-            chamber_code = chamber_code.lower()
-            comm_type = committee.get('type', '').lower()
+            chamber = committee.get('chamber', '').lower()
+            comm_type = committee.get('committeeTypeCode', committee.get('type', '')).lower()
             name = committee.get('name', '')
 
+            # Log extracted values
+            self.logger.debug(
+                "ID generation values: " +
+                f"congress={congress}, " +
+                f"chamber={chamber}, " +
+                f"type={comm_type}, " +
+                f"name={name}"
+            )
+
             # Validate required components
-            if not all([congress, chamber_code, comm_type, name]):
+            if not all([congress, chamber, comm_type, name]):
                 self.logger.warning(
-                    f"Missing required fields for committee ID generation: "
-                    f"congress={congress}, chamber_code={chamber_code}, "
+                    f"Missing required fields for committee ID generation: " +
+                    f"congress={congress}, chamber={chamber}, " +
                     f"comm_type={comm_type}, name={name}"
                 )
                 return None
 
             # Generate hash for name
             name_hash = hashlib.md5(name.encode()).hexdigest()[:8]
-            return f"{congress}-{chamber_code}-{comm_type}-{name_hash}"
+            committee_id = f"{congress}-{chamber}-{comm_type}-{name_hash}"
+            
+            self.logger.debug(f"Generated committee ID: {committee_id}")
+            return committee_id
 
         except Exception as e:
             self.logger.error(f"Failed to generate committee ID: {str(e)}")
+            self.logger.debug(f"Committee data that caused error: {json.dumps(committee, indent=2)}")
             return None
 
     def _process_hearing(self, hearing: Dict, current_congress: int) -> Optional[Dict]:
