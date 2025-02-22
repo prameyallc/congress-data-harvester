@@ -1,103 +1,128 @@
 # Architecture Overview
 
-## System Architecture
+## System Design
 
-The Congress Data Downloader is built with a modular architecture focusing on reliability, scalability, and maintainability. Below is the high-level system diagram:
+The Congress Data Downloader is a Python-based service designed to efficiently download and store legislative data from Congress.gov. The architecture emphasizes reliability, scalability, and maintainability.
 
 ```mermaid
-graph LR
-    A[Congress.gov API] <--> B[Congress Downloader]
-    B <--> C[Amazon DynamoDB]
-    B --> D[Amazon CloudWatch]
+graph TB
+    A[Congress.gov API] --> B[API Client]
+    B --> C[Data Validator]
+    C --> D[DynamoDB Handler]
+    D --> E[Amazon DynamoDB]
+    B --> F[CloudWatch Metrics]
+
+    subgraph "Core Components"
+        B
+        C
+        D
+    end
 ```
 
 ## Core Components
 
-### 1. Congress Downloader (congress_downloader.py)
-- Main application entry point
-- Handles command-line arguments
-- Orchestrates the download process
-- Manages parallel processing
-- Implements graceful shutdown
+### 1. API Client (congress_api.py)
+Manages all interactions with the Congress.gov API.
 
-Key responsibilities:
-```python
-def main():
-    # Parse arguments
-    # Initialize components
-    # Execute download mode
-    # Handle cleanup
-```
+Key Features:
+- Rate limiting with backoff
+- Error handling
+- Response transformation
+- Request retries
 
-### 2. Congress API Client (congress_api.py)
-- Manages Congress.gov API interactions
-- Implements rate limiting
-- Handles authentication
-- Transforms API responses
-
-Key features:
 ```python
 class CongressAPI:
-    def get_data_for_date(self, date)
-    def _rate_limit_wait(self)
-    def _make_request(self, endpoint, params)
+    def __init__(self, config):
+        self.base_url = config['base_url']
+        self.rate_limit = config['rate_limit']
+        self.session = self._setup_session()
+
+    def get_data_for_date(self, date):
+        """Fetch all data types for a specific date."""
+        pass
+
+    def _make_request(self, endpoint, params):
+        """Make API request with rate limiting."""
+        pass
+```
+
+### 2. Data Validator (data_validator.py)
+Ensures data integrity and consistency.
+
+Responsibilities:
+- Schema validation
+- Data normalization
+- Error checking
+- Type conversion
+
+```python
+class DataValidator:
+    def validate_committee(self, committee):
+        """Validate committee data structure."""
+        pass
+
+    def validate_hearing(self, hearing):
+        """Validate hearing data structure."""
+        pass
 ```
 
 ### 3. DynamoDB Handler (dynamo_handler.py)
-- Manages DynamoDB operations
-- Handles table creation and verification
-- Implements batch operations
-- Provides error handling
+Manages all database operations.
 
-Core functionality:
+Features:
+- Batch operations
+- Error recovery
+- Connection management
+- Query optimization
+
 ```python
 class DynamoHandler:
-    def store_item(self, item)
-    def batch_store_items(self, items)
-    def query_by_date_range(self, start, end)
+    def store_item(self, item):
+        """Store single item in DynamoDB."""
+        pass
+
+    def batch_store_items(self, items):
+        """Store multiple items in batches."""
+        pass
 ```
 
-### 4. Data Validator (data_validator.py)
-- Validates API responses
-- Ensures data integrity
-- Transforms and normalizes data
+### 4. Monitoring System (monitoring.py)
+Tracks system health and performance.
 
-Validation process:
-```python
-class DataValidator:
-    def validate_bill(self, bill)
-    def validate_sponsor(self, sponsor)
-    def validate_committee(self, committee)
-```
+Metrics:
+- API response times
+- Error rates
+- Resource usage
+- Operation counts
 
-### 5. Monitoring System (monitoring.py)
-- Collects performance metrics
-- Tracks resource usage
-- Reports to CloudWatch
-- Provides operation insights
-
-Metrics collection:
 ```python
 class MetricsCollector:
-    def track_api_request(self, endpoint, status, duration)
-    def track_dynamo_operation(self, operation, success)
-    def track_resource_usage(self)
+    def track_api_request(self, endpoint, status, duration):
+        """Track API request metrics."""
+        pass
+
+    def track_dynamo_operation(self, operation, success):
+        """Track DynamoDB operation metrics."""
+        pass
 ```
 
 ## Data Flow
 
-### 1. Initial Request
+### 1. API Request Flow
 ```mermaid
 sequenceDiagram
-    participant CLI
-    participant Downloader
-    participant API
+    participant App
+    participant APIClient
+    participant Validator
     participant DynamoDB
 
-    CLI->>Downloader: Start download
-    Downloader->>API: Request data
-    API-->>Downloader: Return data
-    Downloader->>DynamoDB: Store data
+    App->>APIClient: Request data
+    APIClient->>APIClient: Apply rate limiting
+    APIClient->>Congress.gov: Make API request
+    Congress.gov-->>APIClient: Return response
+    APIClient->>Validator: Validate data
+    Validator-->>APIClient: Return validated data
+    APIClient->>DynamoDB: Store data
 ```
 
 ### 2. Parallel Processing
@@ -106,103 +131,149 @@ sequenceDiagram
     participant Main
     participant Worker1
     participant Worker2
-    participant Worker3
     participant API
     participant DynamoDB
 
-    Main->>Worker1: Process chunk 1
-    Main->>Worker2: Process chunk 2
-    Main->>Worker3: Process chunk 3
+    Main->>Worker1: Process dates 1-5
+    Main->>Worker2: Process dates 6-10
 
     par Parallel Processing
         Worker1->>API: Get data
         Worker2->>API: Get data
-        Worker3->>API: Get data
     end
 
     par Parallel Storage
         Worker1->>DynamoDB: Store data
         Worker2->>DynamoDB: Store data
-        Worker3->>DynamoDB: Store data
     end
 ```
 
 ## Error Handling
 
-1. **API Rate Limiting**
-   - Exponential backoff
-   - Request queuing
-   - Automatic retries
+### 1. API Errors
+- Rate limit handling
+- Network timeouts
+- Invalid responses
+- Authentication failures
 
-2. **Data Validation**
-   - Schema validation
-   - Data normalization
-   - Error reporting
+```python
+try:
+    response = self._make_request(endpoint, params)
+except RateLimitExceeded:
+    self._handle_rate_limit()
+except NetworkTimeout:
+    self._handle_timeout()
+```
 
-3. **Storage Operations**
-   - Batch operation retries
-   - Conditional writes
-   - Error recovery
+### 2. Data Validation
+- Schema validation
+- Required fields
+- Data type checking
+- Format validation
+
+```python
+def validate_committee(self, committee):
+    try:
+        self._check_required_fields(committee)
+        self._validate_types(committee)
+        return True, None
+    except ValidationError as e:
+        return False, str(e)
+```
+
+### 3. Storage Errors
+- Connection issues
+- Capacity limits
+- Batch failures
+- Consistency errors
+
+```python
+def batch_store_items(self, items):
+    try:
+        with self.table.batch_writer() as batch:
+            for item in items:
+                batch.put_item(Item=item)
+    except Exception as e:
+        self._handle_batch_error(e, items)
+```
 
 ## Performance Optimization
 
-1. **Parallel Processing**
-   - Configurable worker count
-   - Chunk-based processing
-   - Resource monitoring
+### 1. Caching
+- API response caching
+- Schema validation caching
+- Configuration caching
 
-2. **Caching**
-   - API response caching
-   - Schema validation caching
-   - Configuration caching
+```python
+class ResponseCache:
+    def get_cached_response(self, key):
+        """Get cached API response."""
+        pass
 
-3. **Batch Operations**
-   - Optimized batch sizes
-   - Automatic batch splitting
-   - Failed item retry
+    def cache_response(self, key, response):
+        """Cache API response."""
+        pass
+```
 
-## Security Considerations
+### 2. Batch Processing
+- Optimized batch sizes
+- Parallel processing
+- Efficient retries
 
-1. **API Authentication**
-   - Secure key storage
-   - Request signing
-   - Rate limit compliance
+```python
+def process_date_range(self, start_date, end_date):
+    with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+        chunks = self._chunk_dates(start_date, end_date)
+        futures = [executor.submit(self._process_chunk, chunk) 
+                  for chunk in chunks]
+```
 
-2. **Data Storage**
-   - Encryption at rest
-   - Access control
-   - Audit logging
+### 3. Resource Management
+- Connection pooling
+- Memory optimization
+- CPU utilization
 
-3. **Monitoring**
-   - Error tracking
-   - Performance metrics
-   - Resource utilization
+```python
+class ResourceManager:
+    def monitor_resources(self):
+        """Monitor system resource usage."""
+        pass
 
-## Configuration Management
+    def optimize_resources(self):
+        """Optimize resource allocation."""
+        pass
+```
 
-1. **Environment Variables**
-   - Credential management
-   - Runtime configuration
-   - Feature flags
+## Security
 
-2. **Application Config**
-   - Date range settings
-   - Performance tuning
-   - Logging configuration
+### 1. Authentication
+- API key management
+- AWS credentials
+- Token rotation
+
+### 2. Data Protection
+- Encryption at rest
+- Secure transmission
+- Access control
+
+### 3. Monitoring
+- Security events
+- Access logs
+- Error tracking
 
 ## Future Extensibility
 
-1. **API Versioning**
-   - Version compatibility
-   - Schema migration
-   - Feature deprecation
+### 1. API Versioning
+- Version compatibility
+- Schema migration
+- Feature deprecation
 
-2. **Data Storage**
-   - Multiple storage backends
-   - Data archival
-   - Backup strategies
+### 2. Storage Options
+- Multiple backends
+- Data archival
+- Backup strategies
 
-3. **Monitoring**
-   - Custom metrics
-   - Alert integration
-   - Dashboard creation
+### 3. Monitoring
+- Custom metrics
+- Alert integration
+- Dashboard creation

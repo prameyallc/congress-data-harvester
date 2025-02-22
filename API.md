@@ -1,161 +1,216 @@
-# API Documentation
+# Congress.gov API Documentation
 
-This document details the Congress.gov API integration and usage patterns implemented in the Congress Data Downloader.
+This document details the integration with the Congress.gov API and provides usage guidelines for the Congress Data Downloader.
 
-## Congress.gov API Integration
+## Overview
 
-### API Client Overview
+The Congress Data Downloader uses the Congress.gov API to fetch and store legislative data. The implementation is primarily handled by the `CongressAPI` class in `congress_api.py`.
 
-The `CongressAPI` class in `congress_api.py` handles all interactions with the Congress.gov API. It implements:
-- Automatic rate limiting
-- Error handling and retries
-- Response validation
-- Data transformation
+### Key Features
+- Automatic rate limiting and backoff
+- Comprehensive error handling
+- Data validation and transformation
+- Detailed logging and monitoring
 
-### Authentication
+## Authentication
 
-The API client requires a Congress.gov API key, which can be obtained from [Congress.gov](https://api.congress.gov/). The key can be provided through:
-1. Environment variable: `CONGRESS_API_KEY`
-2. Configuration file: `config.json` (not recommended)
+### API Key Setup
+1. Obtain an API key from [Congress.gov](https://api.congress.gov/)
+2. Set the key using environment variables:
+```bash
+export CONGRESS_API_KEY=your_api_key
+```
 
-### Rate Limiting
+### Verification
+The application verifies the API key on startup:
+```python
+if not self.api_key:
+    raise ValueError("Congress.gov API key not found in environment or config")
+```
 
-The client implements intelligent rate limiting:
+## Rate Limiting
+
+The API client implements intelligent rate limiting to prevent quota exhaustion:
+
+```python
+# Default configuration (config.json)
+{
+    "api": {
+        "rate_limit": {
+            "requests_per_second": 5,
+            "max_retries": 3,
+            "retry_delay": 1
+        }
+    }
+}
+```
+
+### Features
 - Default limit: 5 requests per second
-- Automatic backoff on rate limit errors
-- Jitter added to prevent thundering herd
-- Exponential backoff on consecutive errors
+- Exponential backoff on errors
+- Random jitter to prevent thundering herd
+- Respect for API retry-after headers
 
-### Error Handling
+## Error Handling
 
-1. **Rate Limit Exceeded**
-   ```python
-   except RateLimitExceeded:
-       time.sleep(self.retry_delay * (2 ** retry_count))
-   ```
+### Common Error Scenarios
 
-2. **Network Errors**
-   ```python
-   except requests.exceptions.RequestException:
-       if retry_count < self.max_retries:
-           time.sleep(self.retry_delay)
-   ```
-
-3. **API Errors**
-   ```python
-   if response.status_code >= 500:
-       # Server error, retry
-   elif response.status_code == 429:
-       # Rate limit hit, backoff
-   ```
-
-### Data Models
-
-1. **Bill Data**
-   ```python
-   {
-       'id': 'bill-id',
-       'congress': 117,
-       'title': 'Bill Title',
-       'bill_type': 'hr',
-       'bill_number': 1234,
-       'introduced_date': '2024-01-01',
-       'update_date': '2024-01-02',
-       'latest_action': {
-           'text': 'Action description',
-           'action_date': '2024-01-02'
-       }
-   }
-   ```
-
-2. **Sponsor Data**
-   ```python
-   {
-       'bioguideId': 'sponsor-id',
-       'firstName': 'First',
-       'lastName': 'Last',
-       'party': 'Party',
-       'state': 'ST'
-   }
-   ```
-
-### Example Usage
-
-1. **Initialize Client**
-   ```python
-   from congress_api import CongressAPI
-
-   api = CongressAPI(config['api'])
-   ```
-
-2. **Fetch Bills by Date**
-   ```python
-   bills = api.get_bills_for_date('2024-01-01')
-   ```
-
-3. **Get Bill Details**
-   ```python
-   bill = api.get_bill_details('117-hr-1234')
-   ```
-
-### Response Validation
-
-The API client validates responses using the `DataValidator` class:
-
+1. Rate Limit Exceeded (429)
 ```python
-validator = DataValidator()
-is_valid, errors = validator.validate_bill(bill_data)
-if is_valid:
-    cleaned_data = validator.cleanup_bill(bill_data)
+if response.status_code == 429:
+    retry_after = response.headers.get('Retry-After', 60)
+    time.sleep(float(retry_after))
+    raise Exception("Rate limit exceeded")
 ```
 
-### Pagination Handling
-
-The client automatically handles pagination for large result sets:
-
+2. Authentication Failed (403)
 ```python
-def get_all_bills_for_date(self, date):
-    offset = 0
-    while True:
-        bills = self.get_bills_for_date(date, offset)
-        if not bills:
-            break
-        yield from bills
-        offset += len(bills)
+if response.status_code == 403:
+    raise Exception("API authentication failed - please verify API key")
 ```
 
-### Error Response Examples
+3. Network Timeouts
+```python
+except requests.exceptions.Timeout:
+    self.consecutive_errors += 1
+    raise Exception("Request timed out")
+```
 
-1. **Rate Limit Error**
-   ```json
-   {
-       "error": "TOO_MANY_REQUESTS",
-       "message": "Rate limit exceeded",
-       "retryAfter": 60
-   }
-   ```
+## Data Models
 
-2. **Invalid API Key**
-   ```json
-   {
-       "error": "INVALID_API_KEY",
-       "message": "The API key provided is invalid"
-   }
-   ```
+### Committee Data
+```python
+{
+    'id': 'committee-id',
+    'type': 'committee',
+    'congress': 119,
+    'update_date': '2024-02-21',
+    'version': 1,
+    'name': 'Committee Name',
+    'chamber': 'House',
+    'committee_type': 'standing',
+    'url': 'https://api.congress.gov/v3/committee/...'
+}
+```
 
-### Best Practices
+### Hearing Data
+```python
+{
+    'id': 'hearing-id',
+    'type': 'hearing',
+    'congress': 119,
+    'update_date': '2024-02-21',
+    'version': 1,
+    'chamber': 'Senate',
+    'committee': 'Committee Name',
+    'title': 'Hearing Title',
+    'date': '2024-02-21',
+    'url': 'https://api.congress.gov/v3/hearing/...'
+}
+```
 
-1. **Rate Limit Compliance**
-   - Respect the rate limits
-   - Implement backoff strategies
-   - Use parallel processing wisely
+## API Endpoints
 
-2. **Error Handling**
-   - Always check response status
-   - Implement proper retries
-   - Log errors comprehensively
+### Available Endpoints
+- `/bill` - Bill information
+- `/amendment` - Amendment details
+- `/committee` - Committee information
+- `/hearing` - Hearing schedules
+- `/member` - Member profiles
+- `/summaries` - Bill summaries
 
-3. **Data Management**
-   - Validate all responses
-   - Clean and normalize data
-   - Handle missing fields gracefully
+### Common Parameters
+- `fromDateTime`: Start date (ISO format)
+- `toDateTime`: End date (ISO format)
+- `congress`: Congress number
+- `chamber`: House/Senate filter
+- `limit`: Results per page
+- `offset`: Pagination offset
+
+## Example Usage
+
+### Initialize Client
+```python
+from congress_api import CongressAPI
+
+api = CongressAPI({
+    'base_url': 'https://api.congress.gov/v3',
+    'rate_limit': {
+        'requests_per_second': 5,
+        'max_retries': 3,
+        'retry_delay': 1
+    }
+})
+```
+
+### Fetch Committee Data
+```python
+# Get committee data for a specific date
+committees = api.get_data_for_date(date=datetime(2024, 2, 21))
+
+# Process and store committee data
+for committee in committees:
+    if committee['type'] == 'committee':
+        store_committee(committee)
+```
+
+## Best Practices
+
+### 1. Rate Limit Compliance
+- Respect the rate limits in config.json
+- Implement proper backoff strategies
+- Monitor API quota usage
+
+### 2. Error Handling
+- Always check response status codes
+- Implement proper retries with backoff
+- Log errors comprehensively
+
+### 3. Data Validation
+- Validate all API responses
+- Transform data consistently
+- Handle missing fields gracefully
+
+### 4. Monitoring
+- Track API request success rates
+- Monitor rate limit status
+- Log response times and errors
+
+## Troubleshooting
+
+### Common Issues
+
+1. Rate Limit Errors
+```
+Error: Rate limit exceeded
+Solution: Reduce requests_per_second in config.json
+```
+
+2. Authentication Errors
+```
+Error: API authentication failed
+Solution: Verify CONGRESS_API_KEY environment variable
+```
+
+3. Timeout Errors
+```
+Error: Request timed out
+Solution: Check network connectivity and increase timeout settings
+```
+
+## Future Improvements
+
+1. Caching Layer
+- Implement response caching
+- Add cache invalidation
+- Support partial updates
+
+2. Enhanced Validation
+- Add schema versioning
+- Implement data migrations
+- Support custom validators
+
+3. Monitoring
+- Add detailed metrics
+- Implement alerting
+- Create dashboards

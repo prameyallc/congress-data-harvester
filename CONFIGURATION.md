@@ -1,11 +1,21 @@
 # Configuration Guide
 
-This document details the configuration options for the Congress Data Downloader.
+This document details the configuration options and setup process for the Congress Data Downloader.
 
-## Configuration File (config.json)
+## Quick Start
 
-The application uses a JSON configuration file with the following structure:
+1. **Essential Environment Variables**
+```bash
+# AWS Credentials
+export AWS_ACCESS_KEY_ID=your_access_key
+export AWS_SECRET_ACCESS_KEY=your_secret_key
+export AWS_DEFAULT_REGION=us-west-2
 
+# Congress.gov API
+export CONGRESS_API_KEY=your_congress_api_key
+```
+
+2. **Basic Configuration File**
 ```json
 {
     "api": {
@@ -21,31 +31,15 @@ The application uses a JSON configuration file with the following structure:
         "region": "us-west-2"
     },
     "logging": {
-        "level": "DEBUG",
-        "file": "logs/congress_downloader.log",
-        "max_size": 10485760,
-        "backup_count": 5
-    },
-    "download": {
-        "batch_size": 100,
-        "default_lookback_days": 30,
-        "date_ranges": {
-            "max_range_days": 365,
-            "min_date": "1789-03-04",
-            "default_start_date": "2024-01-01",
-            "default_end_date": "2024-12-31"
-        },
-        "parallel": {
-            "max_workers": 3,
-            "chunk_size": 5
-        }
+        "level": "INFO",
+        "file": "logs/congress_downloader.log"
     }
 }
 ```
 
 ## Configuration Sections
 
-### API Configuration
+### 1. API Configuration
 
 | Parameter | Description | Default | Valid Values |
 |-----------|-------------|---------|--------------|
@@ -54,85 +48,106 @@ The application uses a JSON configuration file with the following structure:
 | max_retries | Maximum retry attempts | 3 | 1-10 |
 | retry_delay | Base delay between retries (seconds) | 1 | 1-60 |
 
-### DynamoDB Configuration
+Example:
+```json
+{
+    "api": {
+        "base_url": "https://api.congress.gov/v3",
+        "rate_limit": {
+            "requests_per_second": 5,
+            "max_retries": 3,
+            "retry_delay": 1
+        }
+    }
+}
+```
+
+### 2. DynamoDB Configuration
 
 | Parameter | Description | Default | Notes |
 |-----------|-------------|---------|-------|
 | table_name | DynamoDB table name | congress-data-dev | Must be unique |
 | region | AWS region | us-west-2 | Valid AWS region |
 
-### Logging Configuration
+Example:
+```json
+{
+    "dynamodb": {
+        "table_name": "congress-data-dev",
+        "region": "us-west-2",
+        "endpoint": "http://localhost:8000"  # Optional, for local testing
+    }
+}
+```
+
+### 3. Logging Configuration
 
 | Parameter | Description | Default | Valid Values |
 |-----------|-------------|---------|--------------|
-| level | Log level | DEBUG | DEBUG, INFO, WARNING, ERROR |
+| level | Log level | INFO | DEBUG, INFO, WARNING, ERROR |
 | file | Log file path | logs/congress_downloader.log | Valid file path |
-| max_size | Maximum log file size (bytes) | 10MB (10485760) | >0 |
+| max_size | Maximum log file size (bytes) | 10MB | >0 |
 | backup_count | Number of backup files | 5 | ≥0 |
 
-### Download Configuration
+Example:
+```json
+{
+    "logging": {
+        "level": "DEBUG",
+        "file": "logs/congress_downloader.log",
+        "max_size": 10485760,
+        "backup_count": 5,
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    }
+}
+```
+
+### 4. Download Configuration
 
 | Parameter | Description | Default | Valid Values |
 |-----------|-------------|---------|--------------|
 | batch_size | Items per batch | 100 | 1-1000 |
-| default_lookback_days | Default days for incremental mode | 30 | ≥1 |
+| lookback_days | Default days for incremental mode | 30 | ≥1 |
 | max_workers | Maximum parallel workers | 3 | 1-10 |
 | chunk_size | Items per worker | 5 | 1-100 |
 
-### Date Range Configuration
-
-| Parameter | Description | Default | Valid Values |
-|-----------|-------------|---------|--------------|
-| max_range_days | Maximum days in a single request | 365 | ≥1 |
-| min_date | Earliest allowed date | 1789-03-04 | Valid date string |
-| default_start_date | Default start if not specified | 2024-01-01 | Valid date string |
-| default_end_date | Default end if not specified | 2024-12-31 | Valid date string |
-
-## Command Line Arguments
-
-The application supports the following command-line arguments to override configuration settings:
-
-```bash
-# Incremental Mode (Recent Updates)
-python congress_downloader.py --mode incremental --lookback-days 7
-
-# Refresh Mode (Specific Date Range)
-python congress_downloader.py --mode refresh --start-date 2024-01-01 --end-date 2024-01-31
-
-# Bulk Mode (Historical Data)
-python congress_downloader.py --mode bulk
+Example:
+```json
+{
+    "download": {
+        "batch_size": 100,
+        "lookback_days": 30,
+        "parallel": {
+            "max_workers": 3,
+            "chunk_size": 5
+        }
+    }
+}
 ```
 
-### Available Arguments
+## Operating Modes
 
-| Argument | Description | Required | Default |
-|----------|-------------|----------|----------|
-| --mode | Operation mode (incremental/refresh/bulk) | Yes | N/A |
-| --lookback-days | Days to look back in incremental mode | No | From config |
-| --start-date | Start date for refresh mode | No | From config |
-| --end-date | End date for refresh mode | No | From config |
-| --config | Path to config file | No | config.json |
-| --log-level | Override logging level | No | From config |
-
-## Environment Variables
-
-Required environment variables:
-
+### 1. Incremental Mode
+Updates recent data only:
 ```bash
-# AWS Credentials
-export AWS_ACCESS_KEY_ID=your_access_key
-export AWS_SECRET_ACCESS_KEY=your_secret_key
-export AWS_DEFAULT_REGION=us-west-2
+python congress_downloader.py --mode incremental --lookback-days 7
+```
 
-# Congress.gov API Key
-export CONGRESS_API_KEY=your_congress_api_key
+### 2. Refresh Mode
+Updates specific date range:
+```bash
+python congress_downloader.py --mode refresh --start-date 2024-01-01 --end-date 2024-01-31
+```
+
+### 3. Bulk Mode
+Downloads historical data:
+```bash
+python congress_downloader.py --mode bulk
 ```
 
 ## Performance Tuning
 
-### Resource Usage Profiles
-
-#### Low Resource Usage
+### Low Resource Profile
 ```json
 {
     "download": {
@@ -141,11 +156,16 @@ export CONGRESS_API_KEY=your_congress_api_key
             "max_workers": 2,
             "chunk_size": 3
         }
+    },
+    "api": {
+        "rate_limit": {
+            "requests_per_second": 3
+        }
     }
 }
 ```
 
-#### High Performance
+### High Performance Profile
 ```json
 {
     "download": {
@@ -154,14 +174,18 @@ export CONGRESS_API_KEY=your_congress_api_key
             "max_workers": 5,
             "chunk_size": 10
         }
+    },
+    "api": {
+        "rate_limit": {
+            "requests_per_second": 8
+        }
     }
 }
 ```
 
-## Required IAM Permissions
+## AWS IAM Configuration
 
-Minimum required permissions for DynamoDB:
-
+### Minimum Required Permissions
 ```json
 {
     "Version": "2012-10-17",
@@ -183,16 +207,55 @@ Minimum required permissions for DynamoDB:
 }
 ```
 
-## Logging
+## Logging Configuration
 
-The application uses rotating log files with configurable settings:
-
+### File-based Logging
 ```python
 {
     "logging": {
-        "level": "DEBUG",  # Options: DEBUG, INFO, WARNING, ERROR
+        "level": "DEBUG",
         "file": "logs/congress_downloader.log",
         "max_size": 10485760,  # 10MB
-        "backup_count": 5
+        "backup_count": 5,
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    }
+}
+```
+
+### CloudWatch Logging
+```python
+{
+    "logging": {
+        "cloudwatch": {
+            "enabled": true,
+            "log_group": "/congress-downloader/prod",
+            "retention_days": 30
+        }
+    }
+}
+```
+
+## Health Checking
+
+Run the health check script to verify configuration:
+```bash
+python health_check.py
+```
+
+Example output:
+```json
+{
+    "environment": {
+        "status": "healthy",
+        "missing_variables": []
+    },
+    "aws_credentials": {
+        "status": "healthy"
+    },
+    "congress_api": {
+        "status": "healthy"
+    },
+    "dynamodb": {
+        "status": "healthy"
     }
 }

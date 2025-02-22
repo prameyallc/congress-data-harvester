@@ -2,111 +2,180 @@
 
 This document outlines the process for contributing to the Congress Data Downloader project.
 
-## How to Contribute
+## Quick Start
 
-### 1. Setting Up Development Environment
-
-1. Fork and clone the repository
+1. **Fork and Clone**
 ```bash
 git clone https://github.com/yourusername/congress-downloader.git
 cd congress-downloader
 ```
 
-2. Install dependencies
+2. **Set Up Environment**
 ```bash
+# Install dependencies
 pip install -r requirements.txt
-```
 
-3. Set up environment variables
-```bash
+# Set required environment variables
 export AWS_ACCESS_KEY_ID=your_access_key
 export AWS_SECRET_ACCESS_KEY=your_secret_key
 export AWS_DEFAULT_REGION=us-west-2
 export CONGRESS_API_KEY=your_congress_api_key
 ```
 
-### 2. Development Workflow
+3. **Verify Setup**
+```bash
+python health_check.py
+```
 
-1. Create a feature branch
+## Development Workflow
+
+### 1. Creating Features
+
+1. Create a feature branch:
 ```bash
 git checkout -b feature/your-feature-name
 ```
 
-2. Make your changes
-3. Run tests
-4. Submit a pull request
-
-### 3. Code Style
-
-This project follows PEP 8 style guide for Python code. Additional style guidelines:
-
-- Use meaningful variable names
-- Write descriptive docstrings
-- Keep functions focused and small
-- Add type hints where appropriate
-- Include inline comments for complex logic
-
-Example:
-```python
-def process_date_chunk(
-    api_client: CongressAPI,
-    db_handler: DynamoHandler,
-    dates: List[datetime],
-    logger: logging.Logger
-) -> Tuple[int, List[Dict]]:
-    """Process a chunk of dates in parallel.
-
-    Args:
-        api_client: Instance of CongressAPI
-        db_handler: Instance of DynamoHandler
-        dates: List of dates to process
-        logger: Logger instance
-
-    Returns:
-        Tuple containing:
-        - Number of successfully processed items
-        - List of failed dates with error details
-    """
-    # Implementation
-```
-
-### 4. Testing
-
-#### Running Tests
+2. Run tests before making changes:
 ```bash
 python -m pytest tests/
 ```
 
-#### Writing Tests
-- Place tests in the `tests/` directory
-- Follow test file naming convention: `test_*.py`
-- Use descriptive test names
-- Include both positive and negative test cases
+3. Implement your changes, following our code style guidelines
 
-Example test:
-```python
-def test_process_date_chunk():
-    # Arrange
-    api_client = MockCongressAPI()
-    db_handler = MockDynamoHandler()
-    dates = [datetime(2024, 1, 1)]
-
-    # Act
-    total_items, failed_dates = process_date_chunk(
-        api_client, db_handler, dates, mock_logger
-    )
-
-    # Assert
-    assert total_items == 10
-    assert len(failed_dates) == 0
+4. Run tests again:
+```bash
+python -m pytest tests/
 ```
 
-### 5. Documentation
+### 2. Code Style
 
-- Update relevant documentation for your changes
-- Include docstrings for new functions and classes
-- Add inline comments for complex logic
-- Update README.md if needed
+We follow PEP 8 with these additional guidelines:
+
+1. **Naming Conventions**
+```python
+# Classes use PascalCase
+class DataValidator:
+
+# Functions and variables use snake_case
+def process_committee_data(committee_info):
+    total_members = calculate_total_members()
+```
+
+2. **Type Hints**
+```python
+from typing import Dict, List, Optional
+
+def get_committee_members(
+    committee_id: str,
+    congress: int
+) -> List[Dict[str, str]]:
+    """Get committee members."""
+    pass
+```
+
+3. **Docstrings**
+```python
+def analyze_committee_data(
+    committee: Dict[str, any]
+) -> Dict[str, any]:
+    """Analyze committee data and extract key information.
+
+    Args:
+        committee: Raw committee data dictionary
+
+    Returns:
+        Dictionary containing analyzed committee information
+
+    Raises:
+        ValueError: If required fields are missing
+    """
+    pass
+```
+
+### 3. Testing
+
+#### Writing Tests
+
+1. **Test File Structure**
+```python
+# test_committee_data.py
+
+def test_process_committee_data():
+    # Arrange
+    test_data = {
+        'name': 'Test Committee',
+        'type': 'standing'
+    }
+
+    # Act
+    result = process_committee_data(test_data)
+
+    # Assert
+    assert result['name'] == 'Test Committee'
+    assert result['type'] == 'standing'
+```
+
+2. **Test Categories**
+- Unit tests: `tests/unit/`
+- Integration tests: `tests/integration/`
+- API tests: `tests/api/`
+
+3. **Mock External Services**
+```python
+from unittest.mock import patch
+
+@patch('congress_api.CongressAPI._make_request')
+def test_api_rate_limiting(mock_request):
+    mock_request.return_value = {'data': 'test'}
+    api = CongressAPI(config)
+    result = api.get_committee_data()
+```
+
+### 4. Documentation
+
+#### Documentation Files
+
+1. **Code Documentation**
+- Add docstrings to all public functions
+- Include type hints
+- Document exceptions
+
+2. **API Documentation**
+- Update API.md for endpoint changes
+- Document request/response formats
+- Include example usage
+
+3. **Configuration Documentation**
+- Update CONFIGURATION.md for new options
+- Document environment variables
+- Include example configurations
+
+### 5. Pull Request Process
+
+1. **Checklist**
+- [ ] Tests pass
+- [ ] Documentation updated
+- [ ] Code follows style guide
+- [ ] Commit messages are descriptive
+
+2. **PR Template**
+```markdown
+## Description
+Brief description of changes
+
+## Type of Change
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Documentation update
+- [ ] Performance improvement
+
+## Testing
+Describe testing performed
+
+## Documentation
+List documentation updates made
+```
 
 ### 6. Commit Messages
 
@@ -121,15 +190,15 @@ type(scope): description
 ```
 
 Types:
-- feat: New feature
-- fix: Bug fix
-- docs: Documentation
-- style: Formatting
-- refactor: Code restructuring
-- test: Adding tests
-- chore: Maintenance
+- `feat`: New feature
+- `fix`: Bug fix
+- `docs`: Documentation
+- `style`: Formatting
+- `refactor`: Code restructuring
+- `test`: Adding tests
+- `chore`: Maintenance
 
-Example:
+Examples:
 ```
 feat(api): add rate limiting to Congress.gov API client
 
@@ -140,27 +209,50 @@ feat(api): add rate limiting to Congress.gov API client
 Closes #123
 ```
 
-### 7. Pull Request Process
+### 7. Issue Guidelines
 
-1. Create descriptive pull request title
-2. Fill out the pull request template
-3. Reference any related issues
-4. Ensure all tests pass
-5. Request review from maintainers
+When creating issues:
 
-### 8. Issue Reporting
+1. **Bug Reports**
+```markdown
+## Bug Description
+Clear description of the problem
 
-When creating an issue, include:
+## Steps to Reproduce
+1. Step one
+2. Step two
+3. Step three
 
-1. Clear description of the problem
-2. Steps to reproduce
-3. Expected vs actual behavior
-4. Environment details
-5. Relevant logs or screenshots
+## Expected Behavior
+What should happen
 
-### 9. Development Best Practices
+## Actual Behavior
+What actually happens
 
-#### Error Handling
+## Environment
+- Python version
+- OS
+- Relevant configuration
+```
+
+2. **Feature Requests**
+```markdown
+## Feature Description
+Clear description of proposed feature
+
+## Use Case
+Why this feature is needed
+
+## Proposed Solution
+How you think it should work
+
+## Alternatives Considered
+Other approaches considered
+```
+
+### 8. Development Best Practices
+
+1. **Error Handling**
 ```python
 try:
     data = api_client.get_data_for_date(date)
@@ -170,14 +262,14 @@ except APIError as e:
     raise
 ```
 
-#### Logging
+2. **Logging**
 ```python
 logger.info(f"Processing date: {date_str}")
 logger.debug(f"API response: {response}")
 logger.error(f"Failed to process: {error}")
 ```
 
-#### Configuration
+3. **Configuration**
 ```python
 def load_config():
     try:
@@ -188,20 +280,20 @@ def load_config():
         raise
 ```
 
-### 10. Release Process
+### 9. Release Process
 
-1. Version Bumping
+1. **Version Bumping**
 ```bash
 bumpversion patch  # or minor, major
 ```
 
-2. Tag Release
-```bash
-git tag -a v1.0.0 -m "Release version 1.0.0"
-git push origin v1.0.0
-```
+2. **Changelog Updates**
+- Document all changes
+- Note breaking changes
+- Include upgrade steps
 
-3. Update Changelog
-- Document all significant changes
-- Include migration steps if needed
-- Note any breaking changes
+3. **Testing Checklist**
+- [ ] All tests pass
+- [ ] Integration tests pass
+- [ ] Documentation accurate
+- [ ] Release notes complete

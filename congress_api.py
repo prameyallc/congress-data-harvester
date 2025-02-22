@@ -4,11 +4,11 @@ from datetime import datetime
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from typing import Dict, List, Any, Optional, Union
 import logging
 from random import uniform
 from monitoring import metrics
 from data_validator import DataValidator
-from typing import Dict, List, Any, Optional
 import hashlib
 import re
 import json
@@ -16,7 +16,7 @@ import json
 class CongressBaseAPI:
     """Base class for Congress.gov API interactions"""
 
-    def __init__(self, config):
+    def __init__(self, config: Dict[str, Any]) -> None:
         self.base_url = config['base_url'].rstrip('/')
         self.rate_limit = config['rate_limit']
         self.api_key = os.environ.get('CONGRESS_API_KEY', config.get('api_key'))
@@ -28,7 +28,7 @@ class CongressBaseAPI:
         self.logger = logging.getLogger('congress_downloader')
         self.timeout = (5, 30)  # (connect timeout, read timeout)
 
-    def _setup_session(self):
+    def _setup_session(self) -> requests.Session:
         """Set up requests session with retry strategy"""
         session = requests.Session()
         retry_strategy = Retry(
@@ -44,7 +44,7 @@ class CongressBaseAPI:
         session.mount("http://", adapter)
         return session
 
-    def _rate_limit_wait(self):
+    def _rate_limit_wait(self) -> None:
         """Implement rate limiting with jitter"""
         current_time = time.time()
         time_since_last_request = current_time - self.last_request_time
@@ -61,7 +61,7 @@ class CongressBaseAPI:
             time.sleep(sleep_time)
         self.last_request_time = time.time()
 
-    def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
+    def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Make API request with rate limiting and error handling"""
         self._rate_limit_wait()
         if params is None:
@@ -109,6 +109,7 @@ class CongressBaseAPI:
 
             self.logger.error(f"Unexpected status code {response.status_code} for {url}: {response.text}")
             response.raise_for_status()
+            return {}  # Unreachable but satisfies return type
 
         except requests.exceptions.Timeout as e:
             duration = time.time() - start_time
@@ -340,6 +341,7 @@ class CongressAPI(CongressBaseAPI):
     def _process_item(self, endpoint: str, item: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a single item based on its type"""
         try:
+            # Note name change for summaries -> summary
             processors = {
                 'bill': self._process_bill,
                 'amendment': self._process_amendment,
@@ -353,7 +355,7 @@ class CongressAPI(CongressBaseAPI):
                 'house-requirement': self._process_house_requirement,
                 'senate-communication': self._process_senate_communication,
                 'member': self._process_member,
-                'summaries': self._process_summaries
+                'summaries': self._process_summary  # Changed to match new method name
             }
 
             if endpoint not in processors:
