@@ -149,7 +149,7 @@ class DataValidator:
     def validate_nomination(self, nomination: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """Validate nomination data structure"""
         errors = []
-        required_fields = ['id', 'congress', 'update_date', 'citation', 'description']
+        required_fields = ['id', 'congress', 'update_date', 'description', 'organization']
 
         for field in required_fields:
             if field not in nomination:
@@ -162,10 +162,10 @@ class DataValidator:
             if 'citation' in nomination:
                 if not nomination['citation'].startswith('PN'):
                     errors.append("Citation must start with 'PN'")
-
-            # Description validation
-            if 'description' in nomination and not nomination['description'].strip():
-                errors.append("Description cannot be empty")
+            else:
+                # Generate citation from other fields if missing
+                if all(key in nomination for key in ['number', 'partNumber']):
+                    nomination['citation'] = f"PN{nomination['number']}-{nomination['partNumber']}"
 
             # Organization validation
             if 'organization' in nomination and not nomination['organization'].strip():
@@ -733,38 +733,55 @@ class DataValidator:
     def validate_committee(self, committee: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """Validate committee data structure"""
         errors = []
-        required_fields = ['id', 'congress', 'update_date', 'name', 'chamber', 'committee_type']
+        required_fields = ['id', 'congress', 'update_date', 'name', 'chamber']
 
         for field in required_fields:
             if field not in committee:
                 errors.append(f"Missing required field: {field}")
 
         if not errors:
-            errors.extend(self._validate_common_fields(committee)) #Added common field validation
+            errors.extend(self._validate_common_fields(committee))
+
+            # Committee type validation - map from API response field
+            committee_type = committee.get('committee_type') or committee.get('committeeTypeCode', '').lower()
+            if committee_type:
+                committee['committee_type'] = committee_type
+                valid_types = ['standing', 'select', 'joint', 'special', 'subcommittee']
+                if committee_type.lower() not in valid_types:
+                    errors.append(f"Invalid committee_type: {committee_type}")
+            else:
+                committee['committee_type'] = 'standing'  # Default type if not specified
 
             # Chamber validation
             valid_chambers = ['house', 'senate', 'joint']
             if committee.get('chamber', '').lower() not in valid_chambers:
                 errors.append(f"Invalid chamber: {committee.get('chamber')}")
 
-            # Committee type validation
-            valid_types = ['standing', 'select', 'joint', 'special', 'subcommittee']
-            if committee.get('committee_type', '').lower() not in valid_types:
-                errors.append(f"Invalid committee_type: {committee.get('committee_type')}")
+            # Parent committee validation
+            if 'parent' in committee:
+                if not isinstance(committee['parent'], dict):
+                    errors.append("Parent committee must be a dictionary")
+                else:
+                    required_parent_fields = ['name', 'systemCode']
+                    for field in required_parent_fields:
+                        if field not in committee['parent']:
+                            errors.append(f"Missing required parent committee field: {field}")
 
             # Subcommittees validation
             if 'subcommittees' in committee:
                 if not isinstance(committee['subcommittees'], list):
                     errors.append("Subcommittees must be a list")
                 else:
-                    for subcommittee in committee['subcommittees']:
+                    for idx, subcommittee in enumerate(committee['subcommittees']):
                         if not isinstance(subcommittee, dict):
-                            errors.append("Each subcommittee must be a dictionary")
-                        elif 'name' not in subcommittee:
-                            errors.append("Each subcommittee must have a name")
+                            errors.append(f"Subcommittee {idx} must be a dictionary")
+                        else:
+                            for field in ['name', 'systemCode']:
+                                if field not in subcommittee:
+                                    errors.append(f"Missing required field {field} in subcommittee {idx}")
 
         is_valid = len(errors) == 0
-        self._update_validation_stats('committee', is_valid) # Use new stats method
+        self._update_validation_stats('committee', is_valid)
         if not is_valid:
             self.logger.warning(f"Committee validation failed: {', '.join(errors)}")
             self.logger.debug(f"Invalid committee data: {json.dumps(committee, indent=2)}")
@@ -773,41 +790,57 @@ class DataValidator:
 
     def cleanup_committee(self, committee: Dict[str, Any]) -> Dict[str, Any]:
         """Clean and normalize committee data"""
-        cleaned = committee.copy()
+        cleaned = self._cleanup_common_fields(committee.copy())
 
-        # Convert congress to integer
-        if 'congress' in cleaned:
-            try:
-                cleaned['congress'] = int(cleaned['congress'])
-            except (ValueError, TypeError):
-                self.logger.warning(f"Could not convert congress to integer: {cleaned['congress']}")
+        # Map API response fields to schema fields
+        field_mapping = {
+            'committeeTypeCode': 'committee_type',
+            'systemCode': 'system_code',
+            'parentCommittee': 'parent_committee'
+        }
+        for api_field, schema_field in field_mapping.items():
+            if api_field in cleaned:
+                cleaned[schema_field] = cleaned[api_field]
+                del cleaned[api_field]
 
-        # Normalize text fields
-        for field in ['name', 'committee_type', 'chamber']:
-            if field in cleaned:
-                cleaned[field] = cleaned[field].lower().strip()
-
-        # Ensure subcommittees is a list
-        if 'subcommittees' not in cleaned or not isinstance(cleaned['subcommittees'], list):
-            cleaned['subcommittees'] = []
+        # Normalize committee type
+        if 'committee_type' in cleaned:
+            cleaned['committee_type'] = cleaned['committee_type'].lower()
         else:
-            # Clean subcommittee data
-            cleaned_subcommittees = []
-            for subcommittee in cleaned['subcommittees']:
-                if isinstance(subcommittee, dict):
-                    cleaned_sub = subcommittee.copy()
-                    if 'name' in cleaned_sub:
-                        cleaned_sub['name'] = cleaned_sub['name'].strip()
-                    cleaned_subcommittees.append(cleaned_sub)
-            cleaned['subcommittees'] = cleaned_subcommittees
+            cleaned['committee_type'] = 'standing'  # Default type
+        
+        # Normalize chamber to lowercase
+        if 'chamber' in cleaned:
+            cleaned['chamber'] = cleaned['chamber'].lower()
 
-        # Ensure parent_committee is a dictionary
-        if 'parent_committee' not in cleaned or not isinstance(cleaned['parent_committee'], dict):
-            cleaned['parent_committee'] = {}
+        # Clean up parent committee structure
+        if 'parent' in cleaned and isinstance(cleaned['parent'], dict):
+            cleaned['parent_committee'] = {
+                'name': cleaned['parent'].get('name', ''),
+                'system_code': cleaned['parent'].get('systemCode', ''),
+                'url': cleaned['parent'].get('url', '')
+            }
+            del cleaned['parent']
 
-        # Remove any empty fields
-        cleaned = {k: v for k, v in cleaned.items() if v is not None and v != ''}
-        cleaned = self._cleanup_common_fields(cleaned) #Added common cleanup
+        # Ensure subcommittees is a list with proper structure
+        if 'subcommittees' not in cleaned:
+            cleaned['subcommittees'] = []
+        elif isinstance(cleaned['subcommittees'], list):
+            normalized_subcommittees = []
+            for sub in cleaned['subcommittees']:
+                if isinstance(sub, dict):
+                    normalized_sub = {
+                        'name': sub.get('name', ''),
+                        'system_code': sub.get('systemCode', ''),
+                        'url': sub.get('url', '')
+                    }
+                    normalized_subcommittees.append(normalized_sub)
+            cleaned['subcommittees'] = normalized_subcommittees
+
+        # Ensure jurisdiction is present
+        if 'jurisdiction' not in cleaned:
+            cleaned['jurisdiction'] = ''
+
         return cleaned
 
     def validate_hearing(self, hearing: Dict[str, Any]) -> Tuple[bool, List[str]]:
@@ -1041,212 +1074,229 @@ class DataValidator:
     def validate_committee_print(self, print_data: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """Validate committee print data structure"""
         errors = []
-        required_fields = ['id', 'congress', 'update_date', 'committee', 'chamber']
+        required_fields = ['id', 'congress', 'update_date', 'print_number', 'committee', 'title']
 
         for field in required_fields:
             if field not in print_data:
                 errors.append(f"Missing required field: {field}")
 
         if not errors:
-            errors.extend(self._validate_common_fields(print_data)) #Added common field validation
+            errors.extend(self._validate_common_fields(print_data))
 
-        is_valid = len(errors) == 0
-        self._update_validation_stats('committee-print', is_valid) # Use new stats method
-        return is_valid, errors
-
-    def validate_daily_congressional_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Validate daily congressional record data structure"""
-        errors = []
-        required_fields = ['id', 'congress', 'update_date', 'date', 'volume', 'issue', 'chamber']
-
-        for field in required_fields:
-            if field not in record:
-                errors.append(f"Missing required field: {field}")
-
-        if not errors:
-            errors.extend(self._validate_common_fields(record)) #Added common field validation
-
-            # Volume and issue validation
-            if 'volume' in record and not str(record['volume']).strip():
-                errors.append("Volume cannot be empty")
-            if 'issue' in record and not str(record['issue']).strip():
-                errors.append("Issue cannot be empty")
-
-            # Pages validation
-            if 'pages' in record:
-                if not isinstance(record['pages'], list):
-                    errors.append("Pages must be a list")
-
-        is_valid = len(errors) == 0
-        self._update_validation_stats('daily-congressional-record', is_valid) # Use new stats method
-        return is_valid, errors
-
-    def validate_bound_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Validate bound congressional record data structure"""
-        errors = []
-
-        # Validate common fields first
-        errors.extend(self._validate_common_fields(record))
-
-        # Additional required fields for bound records
-        additional_required = ['type', 'date', 'session_number', 'volume_number']
-        for field in additional_required:
-            if field not in record:
-                errors.append(f"Missing required field: {field}")
-
-        if not errors:
-            # Session number validation
-            try:
-                session_num = int(record['session_number'])
-                if session_num < 1:
-                    errors.append("Session number must be positive")
-            except (ValueError, TypeError):
-                errors.append("Session number must be a valid number")
-
-            # Volume number validation
-            try:
-                volume_num = int(record['volume_number'])
-                if volume_num < 1:
-                    errors.append("Volume number must be positive")
-            except (ValueError, TypeError):
-                errors.append("Session number must be a valid number")
-
-            # Type validation
-            if record['type'] != 'bound-congressional-record':
-                errors.append(f"Invalid type: {record['type']}")
-
-        is_valid = len(errors) == 0
-        if not is_valid:
-            self.logger.warning(f"Bound record validation failed: {', '.join(errors)}")
-            self.logger.debug(f"Invalid record data: {json.dumps(record, indent=2)}")
-
-        self._update_validation_stats('bound-congressional-record', is_valid)
-        return is_valid, errors
-
-    def cleanup_committee_print(self, print_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Clean and normalize committee print data"""
-        cleaned = print_data.copy()
-
-        # Convert congress to integer
-        if 'congress' in cleaned:
-            try:
-                cleaned['congress'] = int(cleaned['congress'])
-            except (ValueError, TypeError):
-                self.logger.warning(f"Could not convert congress to integer: {cleaned['congress']}")
-
-        # Normalize text fields
-        for field in ['title', 'chamber']:
-            if field in cleaned:
-                cleaned[field] = ' '.join(cleaned[field].split())
-
-        # Ensure committee is a dictionary
-        if 'committee' not in cleaned or not isinstance(cleaned['committee'], dict):
-            cleaned['committee'] = {'name': '', 'system_code': '', 'url': ''}
-
-        # Ensure text_versions is a list
-        if 'text_versions' not in cleaned or not isinstance(cleaned['text_versions'], list):
-            cleaned['text_versions'] = []
-        cleaned = self._cleanup_common_fields(cleaned) #Added common cleanup
-        return cleaned
-
-    def validate_committee_meeting(self, meeting: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Validate committee meeting data structure"""
-        errors = []
-
-        # Validate common fields first
-        errors.extend(self._validate_common_fields(meeting))
-
-        # Additional required fields for committee meetings
-        additional_required = ['committee', 'date', 'meeting_type']
-        for field in additional_required:
-            if field not in meeting:
-                errors.append(f"Missing required field: {field}")
-
-        if not errors:
-            # Validate committee structure if present
-            if isinstance(meeting.get('committee'), dict):
+            # Committee validation
+            if isinstance(print_data.get('committee'), dict):
                 required_committee_fields = ['name', 'system_code']
                 for field in required_committee_fields:
-                    if field not in meeting['committee']:
+                    if field not in print_data['committee']:
                         errors.append(f"Missing required committee field: {field}")
             else:
                 errors.append("Committee must be a dictionary with required fields")
 
-            # Validate documents if present
-            if 'documents' in meeting and not isinstance(meeting['documents'], list):
-                errors.append("Documents must be a list")
+            # Chamber validation if present
+            if 'chamber' in print_data:
+                valid_chambers = ['house', 'senate', 'joint']
+                if print_data['chamber'].lower() not in valid_chambers:
+                    errors.append(f"Invalid chamber: {print_data['chamber']}")
 
         is_valid = len(errors) == 0
-        self._update_validation_stats('committee-meeting', is_valid)
+        self._update_validation_stats('committee-print', is_valid)
+        if not is_valid:
+            self.logger.warning(f"Committee print validation failed: {', '.join(errors)}")
+            self.logger.debug(f"Invalid print data: {json.dumps(print_data, indent=2)}")
+
         return is_valid, errors
 
-    def cleanup_committee_meeting(self, meeting: Dict[str, Any]) -> Dict[str, Any]:
-        """Clean and normalize committee meeting data"""
+    def cleanup_committee_print(self, print_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize committee print data"""
         # First apply common cleanup
-        cleaned = self._cleanup_common_fields(meeting)
+        cleaned = self._cleanup_common_fields(print_data)
+
+        # Convert congress_year to integer if present
+        if 'congress_year' in cleaned:
+            try:
+                cleaned['congress_year'] = int(cleaned['congress_year'])
+            except (ValueError, TypeError):
+                self.logger.warning(f"Could not convert congress_year to integer: {cleaned['congress_year']}")
+                cleaned['congress_year'] = None
 
         # Normalize text fields
-        for field in ['title', 'committee', 'subcommittee', 'meeting_type', 'location', 'description']:
+        for field in ['title', 'description']:
             if field in cleaned:
-                cleaned[field] = ' '.join(cleaned[field].split())
-
-        # Ensure documents is a list
-        if 'documents' not in cleaned or not isinstance(cleaned['documents'], list):
-            cleaned['documents'] = []
+                cleaned[field] = ' '.join(cleaned[field].split()).strip()
 
         # Ensure committee is a dictionary with required fields
         if 'committee' not in cleaned or not isinstance(cleaned['committee'], dict):
             cleaned['committee'] = {'name': '', 'system_code': ''}
 
+        # Normalize chamber to lowercase if present
+        if 'chamber' in cleaned:
+            cleaned['chamber'] = cleaned['chamber'].lower()
+
+        # Ensure type field is set
+        cleaned['type'] = 'committee-print'
+
         return cleaned
+
+    def validate_daily_congressional_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate daily congressional record data structure"""
+        errors = []
+
+        # First validate common fields
+        errors.extend(self._validate_common_fields(record))
+
+        # Additional required fields for daily records
+        additional_required = ['date', 'session_number', 'volume_number', 'issue_number', 'chamber']
+        for field in additional_required:
+            if field not in record:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            # Validate numeric fields
+            for field in ['session_number', 'volume_number', 'issue_number']:
+                if field in record:
+                    try:
+                        num = int(record[field])
+                        if num < 1:
+                            errors.append(f"{field} must be positive")
+                    except (ValueError, TypeError):
+                        errors.append(f"{field} must be a valid number")
+
+            # Chamber validation
+            valid_chambers = ['house', 'senate', 'joint']
+            if record.get('chamber', '').lower() not in valid_chambers:
+                errors.append(f"Invalid chamber: {record.get('chamber')}")
+
+            # Sections validation
+            if 'sections' in record:
+                if not isinstance(record['sections'], dict):
+                    errors.append("sections must be a dictionary")
+                else:
+                    valid_sections = ['digest', 'house', 'senate', 'extensions']
+                    for section in record['sections']:
+                        if section not in valid_sections:
+                            errors.append(f"Invalid section: {section}")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('daily-congressional-record', is_valid)
+        if not is_valid:
+            self.logger.warning(f"Daily congressional record validation failed: {', '.join(errors)}")
+            self.logger.debug(f"Invalid record data: {json.dumps(record, indent=2)}")
+
+        return is_valid, errors
+
+    def cleanup_daily_congressional_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize daily congressional record data"""
+        # First apply common cleanup
+        cleaned = self._cleanup_common_fields(record)
+
+        # Convert numeric fields
+        for field in ['session_number', 'volume_number', 'issue_number']:
+            if field in cleaned:
+                try:
+                    cleaned[field] = int(cleaned[field])
+                except (ValueError, TypeError):
+                    self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
+                    cleaned[field] = 1  # Default for required numeric fields
+
+        # Normalize chamber to lowercase
+        if 'chamber' in cleaned:
+            cleaned['chamber'] = cleaned['chamber'].lower()
+
+        # Ensure sections is properly structured
+        if 'sections' not in cleaned or not isinstance(cleaned['sections'], dict):
+            cleaned['sections'] = {
+                'digest': {},
+                'house': {},
+                'senate': {},
+                'extensions': {}
+            }
+
+        # Handle pages if present
+        if 'pages' in cleaned and isinstance(cleaned['pages'], list):
+            cleaned['pages'] = [str(page) for page in cleaned['pages']]
+
+        # Ensure type field is set
+        cleaned['type'] = 'daily-congressional-record'
+
+        return cleaned
+
+    def validate_bound_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate bound congressional record data structure"""
+        errors = []
+
+        # First validate common fields
+        errors.extend(self._validate_common_fields(record))
+
+        # Additional required fields for bound records
+        additional_required = ['date', 'session_number', 'volume_number', 'chamber']
+        for field in additional_required:
+            if field not in record:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            # Numeric field validations
+            for field in ['session_number', 'volume_number']:
+                if field in record:
+                    try:
+                        num = int(record[field])
+                        if num < 1:
+                            errors.append(f"{field} must be positive")
+                    except (ValueError, TypeError):
+                        errors.append(f"{field} must be a valid number")
+
+            # Chamber validation
+            valid_chambers = ['house', 'senate', 'joint']
+            if record.get('chamber', '').lower() not in valid_chambers:
+                errors.append(f"Invalid chamber: {record.get('chamber')}")
+
+            # Sections validation
+            if 'sections' in record:
+                if not isinstance(record['sections'], dict):
+                    errors.append("sections must be a dictionary")
+                else:
+                    valid_sections = ['digest', 'house', 'senate', 'extensions']
+                    for section in record['sections']:
+                        if section not in valid_sections:
+                            errors.append(f"Invalid section: {section}")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('bound-congressional-record', is_valid)
+        if not is_valid:
+            self.logger.warning(f"Bound record validation failed: {', '.join(errors)}")
+            self.logger.debug(f"Invalid record data: {json.dumps(record, indent=2)}")
+
+        return is_valid, errors
 
     def cleanup_bound_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """Clean and normalize bound congressional record data"""
         # First apply common cleanup
         cleaned = self._cleanup_common_fields(record)
 
-        # Convert numeric fields specific to bound records
+        # Convert numeric fields
         for field in ['session_number', 'volume_number']:
             if field in cleaned:
                 try:
                     cleaned[field] = int(cleaned[field])
                 except (ValueError, TypeError):
                     self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
-                    # Use sensible defaults for numeric fields
-                    cleaned[field] = 1
-
-        # Ensure type field is correct
-        cleaned['type'] = 'bound-congressional-record'
-
-        return cleaned
-
-    def cleanup_daily_congressional_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        """Clean and normalize daily congressional record data"""
-        cleaned = record.copy()
-
-        # Convert congress to integer
-        if 'congress' in cleaned:
-            try:
-                cleaned['congress'] = int(cleaned['congress'])
-            except (ValueError, TypeError):
-                self.logger.warning(f"Could not convert congress to integer: {cleaned['congress']}")
+                    cleaned[field] = 1  # Default for required numeric fields
 
         # Normalize chamber to lowercase
         if 'chamber' in cleaned:
             cleaned['chamber'] = cleaned['chamber'].lower()
 
-        # Ensure volume and issue are strings
-        for field in ['volume', 'issue']:
-            if field in cleaned:
-                cleaned[field] = str(cleaned[field])
+        # Ensure sections is properly structured
+        if 'sections' not in cleaned or not isinstance(cleaned['sections'], dict):
+            cleaned['sections'] = {
+                'digest': {},
+                'house': {},
+                'senate': {},
+                'extensions': {}
+            }
 
-        # Ensure pages is a list
-        if 'pages' not in cleaned or not isinstance(cleaned['pages'], list):
-            cleaned['pages'] = []
+        # Ensure type field is correct
+        cleaned['type'] = 'bound-congressional-record'
 
-        # Remove any empty fields
-        cleaned = {k: v for k, v in cleaned.items() if v is not None and v != ''}
-        cleaned = self._cleanup_common_fields(cleaned) #Added common cleanup
         return cleaned
 
     def _is_valid_date(self, date_str: str) -> bool:
@@ -1267,3 +1317,107 @@ class DataValidator:
     def reset_validation_stats(self):
         """Reset validation statistics"""
         self.validation_stats = {}
+
+    def validate_committee_meeting(self, meeting: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate committee meeting data structure"""
+        errors = []
+        required_fields = ['id', 'congress', 'update_date', 'committee', 'date', 'meeting_type', 'location', 'title']
+
+        for field in required_fields:
+            if field not in meeting:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            errors.extend(self._validate_common_fields(meeting))
+
+            # Committee validation
+            if 'committee' in meeting:
+                if not isinstance(meeting['committee'], dict):
+                    errors.append("Committee must be a dictionary")
+                else:
+                    for field in ['name', 'system_code']:
+                        if field not in meeting['committee']:
+                            errors.append(f"Missing required committee field: {field}")
+
+            # Date validation
+            if 'date' in meeting and not self._is_valid_date(meeting['date']):
+                errors.append(f"Invalid date format: {meeting['date']}")
+
+            # Time validation
+            if 'time' in meeting and meeting['time']:
+                time_pattern = re.compile(r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
+                if not time_pattern.match(meeting['time']):
+                    errors.append(f"Invalid time format: {meeting['time']}")
+
+            # Documents validation
+            if 'documents' in meeting:
+                if not isinstance(meeting['documents'], list):
+                    errors.append("Documents must be a list")
+                else:
+                    for idx, doc in enumerate(meeting['documents']):
+                        if not isinstance(doc, dict):
+                            errors.append(f"Document {idx} must be a dictionary")
+                        elif 'url' not in doc:
+                            errors.append(f"Document {idx} must have a URL")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('committee-meeting', is_valid)
+        if not is_valid:
+            self.logger.warning(f"Committee meeting validation failed: {', '.join(errors)}")
+            self.logger.debug(f"Invalid meeting data: {json.dumps(meeting, indent=2)}")
+
+        return is_valid, errors
+
+    def cleanup_committee_meeting(self, meeting: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize committee meeting data"""
+        # First apply common cleanup
+        cleaned = self._cleanup_common_fields(meeting)
+
+        # Map API response fields to schema fields
+        field_mapping = {
+            'meetingType': 'meeting_type',
+            'committeeCode': 'system_code',
+            'documentUrl': 'url'
+        }
+        for api_field, schema_field in field_mapping.items():
+            if api_field in cleaned:
+                cleaned[schema_field] = cleaned[api_field]
+                del cleaned[api_field]
+
+        # Normalize committee structure
+        if 'committee' in cleaned and isinstance(cleaned['committee'], dict):
+            cleaned['committee'] = {
+                'name': cleaned['committee'].get('name', ''),
+                'system_code': cleaned['committee'].get('systemCode', ''),
+                'url': cleaned['committee'].get('url', '')
+            }
+
+        # Normalize time format if present
+        if 'time' in cleaned and cleaned['time']:
+            try:
+                # Convert any time format to HH:MM
+                time_obj = datetime.strptime(cleaned['time'], '%H:%M').strftime('%H:%M')
+                cleaned['time'] = time_obj
+            except ValueError:
+                self.logger.warning(f"Could not normalize time format: {cleaned['time']}")
+                del cleaned['time']
+
+        # Ensure documents is a list with proper structure
+        if 'documents' not in cleaned:
+            cleaned['documents'] = []
+        elif isinstance(cleaned['documents'], list):
+            normalized_docs = []
+            for doc in cleaned['documents']:
+                if isinstance(doc, dict):
+                    normalized_doc = {
+                        'url': doc.get('url', ''),
+                        'type': doc.get('type', ''),
+                        'description': doc.get('description', '')
+                    }
+                    normalized_docs.append(normalized_doc)
+            cleaned['documents'] = normalized_docs
+
+        # Ensure type field is set
+        cleaned['type'] = 'committee-meeting'
+
+        return cleaned

@@ -118,7 +118,14 @@ class DynamoHandler:
                     {'AttributeName': 'congress', 'AttributeType': 'N'},
                     {'AttributeName': 'chamber', 'AttributeType': 'S'},
                     {'AttributeName': 'date', 'AttributeType': 'S'},
-                    {'AttributeName': 'version', 'AttributeType': 'N'}
+                    {'AttributeName': 'version', 'AttributeType': 'N'},
+                    {'AttributeName': 'bill_number', 'AttributeType': 'N'},
+                    {'AttributeName': 'report_number', 'AttributeType': 'S'},
+                    {'AttributeName': 'treaty_number', 'AttributeType': 'S'},
+                    {'AttributeName': 'nomination_number', 'AttributeType': 'N'},
+                    {'AttributeName': 'committee_id', 'AttributeType': 'S'},
+                    {'AttributeName': 'meeting_date', 'AttributeType': 'S'},
+                    {'AttributeName': 'print_number', 'AttributeType': 'S'},
                 ],
                 GlobalSecondaryIndexes=[
                     # GSI for querying by type and update date
@@ -166,6 +173,67 @@ class DynamoHandler:
                         'KeySchema': [
                             {'AttributeName': 'version', 'KeyType': 'HASH'},
                             {'AttributeName': 'update_date', 'KeyType': 'RANGE'}
+                        ],
+                        'Projection': {'ProjectionType': 'ALL'},
+                        'ProvisionedThroughput': {
+                            'ReadCapacityUnits': 5,
+                            'WriteCapacityUnits': 5
+                        }
+                    },
+                    # Add new GSIs for optimized queries
+                    {
+                        'IndexName': 'bill-congress-index',
+                        'KeySchema': [
+                            {'AttributeName': 'bill_number', 'KeyType': 'HASH'},
+                            {'AttributeName': 'congress', 'KeyType': 'RANGE'}
+                        ],
+                        'Projection': {'ProjectionType': 'ALL'},
+                        'ProvisionedThroughput': {
+                            'ReadCapacityUnits': 5,
+                            'WriteCapacityUnits': 5
+                        }
+                    },
+                    {
+                        'IndexName': 'committee-meeting-index',
+                        'KeySchema': [
+                            {'AttributeName': 'committee_id', 'KeyType': 'HASH'},
+                            {'AttributeName': 'meeting_date', 'KeyType': 'RANGE'}
+                        ],
+                        'Projection': {'ProjectionType': 'ALL'},
+                        'ProvisionedThroughput': {
+                            'ReadCapacityUnits': 5,
+                            'WriteCapacityUnits': 5
+                        }
+                    },
+                    {
+                        'IndexName': 'nomination-congress-index',
+                        'KeySchema': [
+                            {'AttributeName': 'nomination_number', 'KeyType': 'HASH'},
+                            {'AttributeName': 'congress', 'KeyType': 'RANGE'}
+                        ],
+                        'Projection': {'ProjectionType': 'ALL'},
+                        'ProvisionedThroughput': {
+                            'ReadCapacityUnits': 5,
+                            'WriteCapacityUnits': 5
+                        }
+                    },
+                    {
+                        'IndexName': 'treaty-congress-index',
+                        'KeySchema': [
+                            {'AttributeName': 'treaty_number', 'KeyType': 'HASH'},
+                            {'AttributeName': 'congress', 'KeyType': 'RANGE'}
+                        ],
+                        'Projection': {'ProjectionType': 'ALL'},
+                        'ProvisionedThroughput': {
+                            'ReadCapacityUnits': 5,
+                            'WriteCapacityUnits': 5
+                        }
+                    },
+                    {
+                        'IndexName': 'report-congress-index',
+                        'KeySchema': [
+                            {'AttributeName': 'report_number', 'KeyType': 'HASH'},
+                            {'AttributeName': 'congress', 'KeyType': 'RANGE'}
                         ],
                         'Projection': {'ProjectionType': 'ALL'},
                         'ProvisionedThroughput': {
