@@ -11,6 +11,7 @@ class MetricsCollector:
         self.service_name = service_name
         self.logger = logging.getLogger('congress_downloader')
         self.cloudwatch_enabled = False
+        self.request_start_times: Dict[str, float] = {}
         try:
             self.cloudwatch = boto3.client('cloudwatch', region_name=region)
             # Test CloudWatch permissions
@@ -100,15 +101,47 @@ class MetricsCollector:
             return wrapper
         return decorator
 
+    def track_api_request_start(self, endpoint: str):
+        """Track the start of an API request"""
+        self.request_start_times[endpoint] = time.time()
+        self._put_metric(
+            'api_requests_initiated',
+            1,
+            'Count',
+            {'Endpoint': endpoint}
+        )
+
     def track_api_request(self, endpoint: str, status_code: int, duration: float):
-        """Track API request metrics"""
+        """Track API request metrics with enhanced monitoring"""
         dimensions = {
             'Endpoint': endpoint,
             'StatusCode': str(status_code)
         }
 
+        # Track request duration
         self._put_metric('api_request_duration', duration, 'Seconds', dimensions)
+
+        # Track request count
         self._put_metric('api_requests', 1, 'Count', dimensions)
+
+        # Track success/failure
+        if 200 <= status_code < 300:
+            self._put_metric('api_request_success', 1, 'Count', dimensions)
+        else:
+            self._put_metric('api_request_failure', 1, 'Count', dimensions)
+            error_type = 'rate_limit' if status_code == 429 else 'other'
+            self._put_metric(
+                'api_request_errors',
+                1,
+                'Count',
+                {**dimensions, 'ErrorType': error_type}
+            )
+
+    def track_rate_limit_wait(self, endpoint: str, wait_time: float):
+        """Track rate limit wait times"""
+        dimensions = {'Endpoint': endpoint}
+        self._put_metric('rate_limit_wait_time', wait_time, 'Seconds', dimensions)
+        self._put_metric('rate_limit_waits', 1, 'Count', dimensions)
 
     def track_dynamo_operation(self, operation: str, table: str, success: bool, duration: float):
         """Track DynamoDB operation metrics"""

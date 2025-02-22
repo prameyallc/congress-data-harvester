@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -13,18 +13,95 @@ import hashlib
 import re
 import json
 
+class RateLimiter:
+    """Handles rate limiting for API requests"""
+    
+    def __init__(self, config: Dict[str, Any]) -> None:
+        self.requests_per_second = config.get('requests_per_second', 5)
+        self.max_retries = config.get('max_retries', 3)
+        self.retry_delay = config.get('retry_delay', 1)
+        self.last_request_time: Dict[str, float] = {}
+        self.consecutive_errors: Dict[str, int] = {}
+        self.logger = logging.getLogger('congress_downloader')
+        self.endpoint_counts: Dict[str, int] = {}
+        self.start_time = time.time()
+
+    def wait(self, endpoint: str) -> None:
+        """Implement rate limiting with jitter for specific endpoint"""
+        current_time = time.time()
+        last_time = self.last_request_time.get(endpoint, 0)
+        time_since_last_request = current_time - last_time
+        
+        # Track request counts
+        self.endpoint_counts[endpoint] = self.endpoint_counts.get(endpoint, 0) + 1
+        
+        # Calculate current rate
+        elapsed_time = current_time - self.start_time
+        if elapsed_time > 0:
+            current_rate = self.endpoint_counts[endpoint] / elapsed_time
+            self.logger.info(
+                f"Rate stats for {endpoint}: "
+                f"{self.endpoint_counts[endpoint]} requests in {elapsed_time:.1f}s "
+                f"(current rate: {current_rate:.2f} req/s, limit: {self.requests_per_second} req/s)"
+            )
+        
+        # Base wait time with endpoint-specific adjustment
+        base_wait = 1.0 / self.requests_per_second
+        if endpoint in ['bill', 'amendment', 'nomination']:  # High-volume endpoints
+            base_wait *= 1.5
+            self.logger.debug(f"Applied 1.5x multiplier to base wait time for high-volume endpoint {endpoint}")
+        
+        # Add jitter (±10% of base wait time)
+        jitter = uniform(-0.1 * base_wait, 0.1 * base_wait)
+        wait_time = max(0, base_wait + jitter)
+        
+        # Apply exponential backoff if there were errors
+        error_count = self.consecutive_errors.get(endpoint, 0)
+        if error_count > 0:
+            backoff_multiplier = min(2 ** error_count, 60)
+            wait_time *= backoff_multiplier
+            self.logger.warning(
+                f"Rate limit backoff for {endpoint}: "
+                f"waiting {wait_time:.2f} seconds after {error_count} consecutive errors"
+            )
+        
+        if time_since_last_request < wait_time:
+            sleep_time = wait_time - time_since_last_request
+            self.logger.info(
+                f"Rate limiting {endpoint}: "
+                f"waiting {sleep_time:.2f}s "
+                f"(last request: {time_since_last_request:.2f}s ago)"
+            )
+            metrics.track_rate_limit_wait(endpoint, sleep_time)
+            time.sleep(sleep_time)
+        
+        self.last_request_time[endpoint] = time.time()
+
+    def record_success(self, endpoint: str) -> None:
+        """Record successful request"""
+        prev_errors = self.consecutive_errors.get(endpoint, 0)
+        if prev_errors > 0:
+            self.logger.info(f"Reset error count for {endpoint} after successful request")
+        self.consecutive_errors[endpoint] = 0
+
+    def record_error(self, endpoint: str) -> None:
+        """Record failed request"""
+        self.consecutive_errors[endpoint] = self.consecutive_errors.get(endpoint, 0) + 1
+        self.logger.warning(
+            f"Recorded error for {endpoint} "
+            f"(consecutive errors: {self.consecutive_errors[endpoint]})"
+        )
+
 class CongressBaseAPI:
     """Base class for Congress.gov API interactions"""
 
     def __init__(self, config: Dict[str, Any]) -> None:
         self.base_url = config['base_url'].rstrip('/')
-        self.rate_limit = config['rate_limit']
+        self.rate_limiter = RateLimiter(config['rate_limit'])
         self.api_key = os.environ.get('CONGRESS_API_KEY', config.get('api_key'))
         if not self.api_key:
             raise ValueError("Congress.gov API key not found in environment or config")
         self.session = self._setup_session()
-        self.last_request_time = 0
-        self.consecutive_errors = 0
         self.logger = logging.getLogger('congress_downloader')
         self.timeout = (5, 30)  # (connect timeout, read timeout)
 
@@ -32,8 +109,8 @@ class CongressBaseAPI:
         """Set up requests session with retry strategy"""
         session = requests.Session()
         retry_strategy = Retry(
-            total=self.rate_limit['max_retries'],
-            backoff_factor=self.rate_limit['retry_delay'],
+            total=3,  # Use fixed value since we have a separate RateLimiter
+            backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "OPTIONS"],
             respect_retry_after_header=True,
@@ -44,40 +121,26 @@ class CongressBaseAPI:
         session.mount("http://", adapter)
         return session
 
-    def _rate_limit_wait(self) -> None:
-        """Implement rate limiting with jitter"""
-        current_time = time.time()
-        time_since_last_request = current_time - self.last_request_time
-        base_wait = 1.0 / self.rate_limit['requests_per_second']
-        jitter = uniform(-0.1 * base_wait, 0.1 * base_wait)
-        wait_time = base_wait + jitter
-        if self.consecutive_errors > 0:
-            backoff_multiplier = min(2 ** self.consecutive_errors, 60)
-            wait_time *= backoff_multiplier
-            self.logger.warning(f"Rate limit backoff: waiting {wait_time:.2f} seconds after {self.consecutive_errors} consecutive errors")
-        if time_since_last_request < wait_time:
-            sleep_time = wait_time - time_since_last_request
-            self.logger.debug(f"Rate limiting: waiting {sleep_time:.2f} seconds")
-            time.sleep(sleep_time)
-        self.last_request_time = time.time()
-
     def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Make API request with rate limiting and error handling"""
-        self._rate_limit_wait()
+        """Make API request with enhanced rate limiting and monitoring"""
         if params is None:
             params = {}
         params['api_key'] = self.api_key
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         start_time = time.time()
 
+        # Apply rate limiting
+        self.rate_limiter.wait(endpoint)
+        
         try:
             self.logger.debug(f"Making request to {url} with params: {json.dumps({k: v for k, v in params.items() if k != 'api_key'}, indent=2)}")
+            
+            # Track request metrics
+            metrics.track_api_request_start(endpoint)
+            
             response = self.session.get(url, params=params, timeout=self.timeout)
             duration = time.time() - start_time
-
-            self.logger.debug(f"Response status code: {response.status_code}")
-            self.logger.debug(f"Response headers: {dict(response.headers)}")
-
+            
             metrics.track_api_request(
                 endpoint=endpoint,
                 status_code=response.status_code,
@@ -85,52 +148,47 @@ class CongressBaseAPI:
             )
 
             if response.status_code == 200:
-                self.consecutive_errors = 0
+                self.rate_limiter.record_success(endpoint)
                 response_json = response.json()
-                self.logger.info(f"Successful response from {endpoint}")
                 self.logger.debug(f"Response data: {json.dumps(response_json, indent=2)}")
-                self.logger.debug(f"Response data keys: {list(response_json.keys())}")
                 return response_json
 
             if response.status_code == 429:
-                self.consecutive_errors += 1
                 retry_after = response.headers.get('Retry-After', 60)
-                self.logger.error(f"Rate limit exceeded. Retry after {retry_after} seconds")
+                self.logger.error(f"Rate limit exceeded for {endpoint}. Retry after {retry_after} seconds")
+                self.rate_limiter.record_error(endpoint)
                 time.sleep(float(retry_after))
-                raise Exception("Rate limit exceeded")
+                raise Exception(f"Rate limit exceeded for {endpoint}")
 
             if response.status_code == 403:
-                self.logger.error(f"API authentication failed. Please verify API key. URL: {url}")
+                self.logger.error(f"API authentication failed for {endpoint}. Please verify API key.")
                 raise Exception("API authentication failed - please verify API key")
 
-            if response.status_code == 404:
-                self.logger.error(f"API endpoint not found: {url}")
-                raise Exception(f"API endpoint not found: {url}")
-
             self.logger.error(f"Unexpected status code {response.status_code} for {url}: {response.text}")
+            self.rate_limiter.record_error(endpoint)
             response.raise_for_status()
-            return {}  # Unreachable but satisfies return type
+            return {}
 
         except requests.exceptions.Timeout as e:
             duration = time.time() - start_time
             self.logger.error(f"Request timed out for endpoint {endpoint}: {str(e)}")
+            self.rate_limiter.record_error(endpoint)
             metrics.track_api_request(
                 endpoint=endpoint,
                 status_code=408,
                 duration=duration
             )
-            self.consecutive_errors += 1
             raise Exception(f"Request timed out: {str(e)}")
 
         except requests.exceptions.RequestException as e:
             duration = time.time() - start_time
+            self.logger.error(f"Request failed for {url}: {str(e)}")
+            self.rate_limiter.record_error(endpoint)
             metrics.track_api_request(
                 endpoint=endpoint,
                 status_code=500,
                 duration=duration
             )
-            self.consecutive_errors += 1
-            self.logger.error(f"Request failed for {url}: {str(e)}")
             raise Exception(f"Request failed: {str(e)}")
 
     def get_available_endpoints(self) -> Dict[str, Any]:
@@ -354,7 +412,8 @@ class CongressAPI(CongressBaseAPI):
                 'house-requirement': self._process_house_requirement,
                 'senate-communication': self._process_senate_communication,
                 'member': self._process_member,
-                'summaries': self._process_summaries  # Updated to match method name
+                'summaries': self._process_summaries,  # Updated to match method name
+                'committee-print': self._process_committee_print
             }
 
             if endpoint not in processors:
@@ -370,55 +429,86 @@ class CongressAPI(CongressBaseAPI):
     def _process_bill(self, bill: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a bill"""
         try:
+            # Debug log the input
+            self.logger.debug(f"Processing bill input: {json.dumps(bill, indent=2)}")
+            
             # Handle case where bill data might be nested
-            bill_data = bill.get('bill', bill)
-            if isinstance(bill_data, str):
-                self.logger.warning(f"Received string instead of dictionary for bill: {bill_data}")
+            if not isinstance(bill, dict):
+                self.logger.error(f"Invalid bill data type: {type(bill)}. Expected dict.")
+                self.logger.error(f"Raw bill data: {bill}")
+                return None
+            
+            # Extract bill data from response
+            if 'bill' in bill:
+                bill_data = bill['bill']
+            else:
+                bill_data = bill
+
+            if not isinstance(bill_data, dict):
+                self.logger.error(f"Invalid bill_data type: {type(bill_data)}. Expected dict.")
+                self.logger.error(f"Raw bill_data: {bill_data}")
                 return None
 
-            # Extract basic bill information
-            bill_type = bill_data.get('type', '')
-            bill_number = bill_data.get('number', '')
-            chamber = bill_data.get('originChamber', '')
+            # Extract required fields with detailed logging
+            required_fields = {
+                'type': bill_data.get('type'),
+                'number': bill_data.get('number'),
+                'originChamber': bill_data.get('originChamber'),
+                'congress': bill_data.get('congress', current_congress),
+                'latestAction': bill_data.get('latestAction', {})
+            }
+
+            # Validate required fields
+            missing_fields = [k for k, v in required_fields.items() if not v]
+            if missing_fields:
+                self.logger.error(f"Missing required fields in bill data: {missing_fields}")
+                self.logger.error(f"Available fields: {list(bill_data.keys())}")
+                return None
             
             # Generate bill ID
             bill_id = self._generate_bill_id({
-                'congress': current_congress,
-                'type': bill_type,
-                'number': bill_number
+                'congress': required_fields['congress'],
+                'type': required_fields['type'],
+                'number': required_fields['number']
             })
 
             if not bill_id:
-                self.logger.warning("Unable to generate ID for bill")
+                self.logger.error("Failed to generate bill ID")
+                self.logger.error(f"ID generation input: {json.dumps(required_fields, indent=2)}")
                 return None
 
+            # Transform to standard format with enhanced error handling
             transformed_bill = {
                 'id': bill_id,
                 'type': 'bill',
-                'congress': current_congress,
+                'congress': required_fields['congress'],
                 'update_date': bill_data.get('updateDate', ''),
                 'version': 1,
-                'bill_type': bill_type,
-                'number': bill_number,
-                'origin_chamber': chamber,
+                'bill_type': required_fields['type'],
+                'number': required_fields['number'],
+                'origin_chamber': required_fields['originChamber'],
                 'title': bill_data.get('title', ''),
                 'latest_action': {
-                    'date': bill_data.get('latestAction', {}).get('actionDate', ''),
-                    'text': bill_data.get('latestAction', {}).get('text', '')
+                    'date': required_fields['latestAction'].get('actionDate', ''),
+                    'text': required_fields['latestAction'].get('text', '')
                 },
                 'url': bill_data.get('url', '')
             }
 
+            self.logger.debug(f"Transformed bill data: {json.dumps(transformed_bill, indent=2)}")
+
+            # Validate transformed data
             is_valid, errors = self.validator.validate_bill(transformed_bill)
             if not is_valid:
-                self.logger.warning(f"Bill {bill_id} failed validation: {errors}")
+                self.logger.error(f"Bill {bill_id} failed validation: {errors}")
+                self.logger.error(f"Invalid bill data: {json.dumps(transformed_bill, indent=2)}")
                 return None
 
             return self.validator.cleanup_bill(transformed_bill)
 
         except Exception as e:
             self.logger.error(f"Failed to transform bill: {str(e)}")
-            self.logger.error(f"Problematic bill data: {json.dumps(bill, indent=2)}")
+            self.logger.error(f"Raw bill data: {json.dumps(bill, indent=2)}")
             return None
 
     def _process_committee(self, committee: Dict, current_congress: int) -> Optional[Dict]:
@@ -711,6 +801,88 @@ class CongressAPI(CongressBaseAPI):
 
         except Exception as e:
             self.logger.error(f"Failed to transform senate communication: {str(e)}")
+            return None
+
+    def _process_committee_print(self, print_data: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a committee print"""
+        try:
+            # Extract committee print data, handling both direct and nested structures
+            committee_print = print_data.get('committeePrint', print_data)
+            
+            if isinstance(committee_print, str):
+                self.logger.warning(f"Received string instead of dictionary for committee print: {committee_print}")
+                return None
+            
+            # Extract basic information
+            chamber = committee_print.get('chamber', {})
+            chamber_name = chamber.get('name', chamber) if isinstance(chamber, dict) else str(chamber)
+            jacket_number = committee_print.get('jacketNumber', '')
+            
+            # Generate print ID
+            print_id = self._generate_committee_print_id({
+                'congress': current_congress,
+                'chamber': chamber_name.lower(),
+                'jacket_number': jacket_number
+            })
+            
+            if not print_id:
+                self.logger.warning("Unable to generate ID for committee print")
+                return None
+
+            transformed_print = {
+                'id': print_id,
+                'type': 'committee-print',
+                'congress': current_congress,
+                'update_date': committee_print.get('updateDate', ''),
+                'version': 1,
+                'chamber': chamber_name,
+                'jacket_number': jacket_number,
+                'title': committee_print.get('title', ''),
+                'publication_date': committee_print.get('publicationDate', ''),
+                'committee': {
+                    'name': committee_print.get('committee', {}).get('name', ''),
+                    'system_code': committee_print.get('committee', {}).get('systemCode', ''),
+                    'url': committee_print.get('committee', {}).get('url', '')
+                },
+                'url': committee_print.get('url', ''),
+                'text_versions': committee_print.get('textVersions', [])
+            }
+
+            is_valid, errors = self.validator.validate_committee_print(transformed_print)
+            if not is_valid:
+                self.logger.warning(f"Committee print {print_id} failed validation: {errors}")
+                return None
+
+            return self.validator.cleanup_committee_print(transformed_print)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform committee print: {str(e)}")
+            self.logger.error(f"Problematic committee print data: {json.dumps(print_data, indent=2)}")
+            return None
+
+    def _generate_committee_print_id(self, print_data: Dict) -> Optional[str]:
+        """Generate a committee print ID from print data"""
+        try:
+            if not isinstance(print_data, dict):
+                self.logger.error(f"Committee print data must be a dictionary, got {type(print_data)}")
+                return None
+
+            congress = str(print_data.get('congress', ''))
+            chamber = print_data.get('chamber', '').lower()
+            jacket_number = str(print_data.get('jacket_number', ''))
+
+            if not all([congress, chamber, jacket_number]):
+                self.logger.warning(
+                    f"Missing required fields for committee print ID generation: "
+                    f"congress={congress}, chamber={chamber}, "
+                    f"jacket_number={jacket_number}"
+                )
+                return None
+
+            return f"{congress}-{chamber}-print-{jacket_number}"
+
+        except Exception as e:
+            self.logger.error(f"Failed to generate committee print ID: {str(e)}")
             return None
 
     def _generate_senate_comm_id(self, comm: Dict) -> Optional[str]:

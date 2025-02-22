@@ -81,7 +81,7 @@ task = "packager.installForAll"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python test_committee_data.py"
+args = "python test_committee_data.py --verbose"
 
 [deployment]
 run = ["sh", "-c", "python congress_downloader.py --mode refresh --start-date 2024-01-20 --end-date 2024-01-20"]

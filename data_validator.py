@@ -45,7 +45,8 @@ class DataValidator:
             'house-requirement': self.validate_house_requirement,
             'senate-communication': self.validate_senate_communication,
             'member': self.validate_member,
-            'summaries': self.validate_summary
+            'summaries': self.validate_summary,
+            'committee-print': self.validate_committee_print
         }
 
         if data_type in validators:
@@ -437,6 +438,8 @@ class DataValidator:
             return self.cleanup_member(data)
         elif data_type == 'summary':
             return self.cleanup_summary(data)
+        elif data_type == 'committee-print':
+            return self.cleanup_committee_print(data)
         return data
 
     def cleanup_bill(self, bill: Dict[str, Any]) -> Dict[str, Any]:
@@ -883,5 +886,65 @@ class DataValidator:
         for field in ['bill_type', 'action_desc', 'text']:
             if field in cleaned:
                 cleaned[field] = ' '.join(cleaned[field].split())
+
+        return cleaned
+
+    def validate_committee_print(self, print_data: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate committee print data structure"""
+        errors = []
+        required_fields = ['id', 'congress', 'update_date', 'chamber', 'jacket_number', 'title']
+
+        for field in required_fields:
+            if field not in print_data:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            # Congress number validation
+            try:
+                congress_num = int(print_data['congress'])
+                if congress_num < 1 or congress_num > 150:
+                    errors.append(f"Invalid congress number: {congress_num}")
+            except (ValueError, TypeError):
+                errors.append("Congress must be a valid number")
+
+            # Date validation
+            if not self._is_valid_date(print_data['update_date']):
+                errors.append(f"Invalid update_date format: {print_data['update_date']}")
+
+            # Committee validation
+            if 'committee' in print_data:
+                if not isinstance(print_data['committee'], dict):
+                    errors.append("Committee must be a dictionary")
+                else:
+                    if 'name' not in print_data['committee']:
+                        errors.append("Committee must contain 'name' field")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('committee-print', is_valid)
+        return is_valid, errors
+
+    def cleanup_committee_print(self, print_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize committee print data"""
+        cleaned = print_data.copy()
+
+        # Convert congress to integer
+        if 'congress' in cleaned:
+            try:
+                cleaned['congress'] = int(cleaned['congress'])
+            except (ValueError, TypeError):
+                self.logger.warning(f"Could not convert congress to integer: {cleaned['congress']}")
+
+        # Normalize text fields
+        for field in ['title', 'chamber']:
+            if field in cleaned:
+                cleaned[field] = ' '.join(cleaned[field].split())
+
+        # Ensure committee is a dictionary
+        if 'committee' not in cleaned or not isinstance(cleaned['committee'], dict):
+            cleaned['committee'] = {'name': '', 'system_code': '', 'url': ''}
+
+        # Ensure text_versions is a list
+        if 'text_versions' not in cleaned or not isinstance(cleaned['text_versions'], list):
+            cleaned['text_versions'] = []
 
         return cleaned
