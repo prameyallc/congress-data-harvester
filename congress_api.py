@@ -695,6 +695,81 @@ class CongressAPI(CongressBaseAPI):
             self.logger.error(f"Report data: {json.dumps(report, indent=2)}")
         return None
 
+    def _process_daily_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a daily congressional record"""
+        try:
+            record_data = record.get('dailyCongressionalRecord', record)
+            if isinstance(record_data, str):
+                self.logger.error(f"Received string instead of dictionary for daily record: {record_data}")
+                return None
+
+            # Extract required fields with proper error handling
+            congress = int(record_data.get('congress', current_congress))
+            volume = record_data.get('volume', '')
+            issue = record_data.get('issue', '')
+            date = record_data.get('date', '')
+            
+            # Generate record ID
+            record_id = self._generate_daily_record_id({
+                'congress': congress,
+                'volume': volume,
+                'issue': issue,
+                'date': date
+            })
+
+            if not record_id:
+                self.logger.error("Failed to generate daily congressional record ID - missing required fields")
+                self.logger.error(f"Raw record data: {json.dumps(record_data, indent=2)}")
+                return None
+
+            transformed_record = {
+                'id': record_id,
+                'type': 'daily-congressional-record',
+                'congress': congress,
+                'update_date': record_data.get('updateDate', ''),
+                'version': 1,
+                'volume': volume,
+                'issue': issue,
+                'date': date,
+                'chamber': record_data.get('chamber', '').lower(),
+                'pages': record_data.get('pages', []),
+                'url': record_data.get('url', '')
+            }
+
+            # Log the transformed data for debugging
+            self.logger.debug(f"Transformed daily record data: {json.dumps(transformed_record, indent=2)}")
+
+            is_valid, errors = self.validator.validate_daily_congressional_record(transformed_record)
+            if not is_valid:
+                self.logger.error(f"Daily congressional record {record_id} failed validation: {errors}")
+                self.logger.error(f"Invalid record data: {json.dumps(transformed_record, indent=2)}")
+                return None
+
+            return self.validator.cleanup_daily_congressional_record(transformed_record)
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform daily congressional record: {str(e)}")
+            self.logger.error(f"Raw record data: {json.dumps(record, indent=2)}")
+            return None
+
+    def _generate_daily_record_id(self, record: Dict) -> Optional[str]:
+        """Generate a daily congressional record ID"""
+        try:
+            congress = str(record.get('congress', ''))
+            volume = str(record.get('volume', ''))
+            issue = str(record.get('issue', ''))
+            date = record.get('date', '')
+            
+            if congress and volume and issue and date:
+                # Clean date to remove non-numeric characters
+                date_clean = re.sub(r'[^0-9]', '', date)
+                return f"{congress}-dcr-{volume}-{issue}-{date_clean}"
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate daily record ID: {str(e)}")
+            self.logger.error(f"Record data: {json.dumps(record, indent=2)}")
+        return None
+
     def _generate_amendment_id(self, amendment: Dict) -> Optional[str]:
         """Generate an amendment ID from amendment data"""
         try:
@@ -724,6 +799,110 @@ class CongressAPI(CongressBaseAPI):
             self.logger.error(f"Failed to generate bill ID: {str(e)}")
             self.logger.error(f"Bill data: {json.dumps(bill, indent=2)}")
         return None
+
+    def _get_endpoint_data(self, endpoint_name: str, date_str: str, current_congress: int) -> List[Dict]:
+        """Get data for a specific endpoint on a specific date"""
+        try:
+            offset = 0
+            all_items = []
+            limit = 100  # Default limit per request
+
+            while True:
+                self.logger.info(f"Fetching {endpoint_name} for date {date_str} (offset: {offset})")
+                
+                # Build params based on endpoint type
+                params = {
+                    'fromDateTime': f"{date_str}T00:00:00Z",
+                    'toDateTime': f"{date_str}T23:59:59Z",
+                    'format': 'json',
+                    'limit': limit,
+                    'offset': offset
+                }
+                
+                # Add specific parameters for certain endpoints
+                if endpoint_name in ['committee', 'committee-meeting']:
+                    params.update({
+                        'congress': current_congress,
+                        'chamber': 'house,senate'
+                    })
+                elif endpoint_name in ['daily-congressional-record', 'bound-congressional-record']:
+                    params = {
+                        'year': datetime.strptime(date_str, '%Y-%m-%d').year,
+                        'month': datetime.strptime(date_str, '%Y-%m-%d').month,
+                        'format': 'json',
+                        'limit': limit,
+                        'offset': offset
+                    }
+
+                response = self._make_request(endpoint_name, params)
+                
+                # Extract items from response based on endpoint type
+                items = []
+                if endpoint_name == 'daily-congressional-record':
+                    items = response.get('dailyCongressionalRecords', [])
+                else:
+                    # Default pluralization for other endpoints
+                    items = response.get(endpoint_name + 's', [])  
+
+                if not items:
+                    self.logger.info(f"Found 0 items in '{endpoint_name + 's'}' key")
+                    self.logger.warning(f"No items found in response for {endpoint_name}")
+                    break
+
+                processed_items = []
+                for item in items:
+                    processed_item = None
+                    
+                    # Process item based on endpoint type
+                    if endpoint_name == 'daily-congressional-record':
+                        processed_item = self._process_daily_congressional_record(item, current_congress)
+                    elif endpoint_name == 'committee':
+                        processed_item = self._process_committee(item, current_congress)
+                    elif endpoint_name == 'hearing':
+                        processed_item = self._process_hearing(item, current_congress)
+                    elif endpoint_name == 'treaty':
+                        processed_item = self._process_treaty(item, current_congress)
+                    elif endpoint_name == 'committee-report':
+                        processed_item = self._process_committee_report(item, current_congress)
+                    elif endpoint_name == 'amendment':
+                        processed_item = self._process_amendment(item, current_congress)
+                    elif endpoint_name == 'bill':
+                        processed_item = self._process_bill(item, current_congress)
+                    elif endpoint_name == 'nomination':
+                        processed_item = self._process_nomination(item, current_congress)
+                    elif endpoint_name == 'house-communication':
+                        processed_item = self._process_house_communication(item, current_congress)
+                    elif endpoint_name == 'senate-communication':
+                        processed_item = self._process_senate_communication(item, current_congress)
+                    elif endpoint_name == 'member':
+                        processed_item = self._process_member(item, current_congress)
+                    elif endpoint_name == 'summaries':
+                        processed_item = self._process_summaries(item, current_congress)
+                    elif endpoint_name == 'committee-print':
+                        processed_item = self._process_committee_print(item, current_congress)
+                    elif endpoint_name == 'committee-meeting':
+                        processed_item = self._process_committee_meeting(item, current_congress)
+                    
+                    if processed_item:
+                        processed_items.append(processed_item)
+
+                if processed_items:
+                    all_items.extend(processed_items)
+                    self.logger.info(f"Successfully processed {len(processed_items)} items")
+                else:
+                    self.logger.warning(f"No items were successfully processed")
+
+                if len(items) < limit:
+                    break
+                    
+                offset += limit
+
+            self.logger.info(f"Successfully processed {len(all_items)} out of {len(items)} {endpoint_name} items")
+            return all_items
+
+        except Exception as e:
+            self.logger.error(f"Error getting {endpoint_name} data: {str(e)}")
+            return []
 
     def _process_bill(self, bill: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a bill"""
@@ -2249,36 +2428,58 @@ class CongressAPI(CongressBaseAPI):
     def _process_daily_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a daily congressional record"""
         try:
-            if not isinstance(record, dict):
-                self.logger.error(f"Invalid record data type: {type(record)}")
+            record_data = record.get('dailyCongressionalRecord', record)
+            if isinstance(record_data, str):
+                self.logger.error(f"Received string instead of dictionary for daily record: {record_data}")
                 return None
 
-            record_data = record.get('daily-congressional-record', record)
+            # Extract required fields with proper error handling
+            congress = int(record_data.get('congress', current_congress))
+            volume = record_data.get('volume', '')
+            issue = record_data.get('issue', '')
+            date = record_data.get('date', '')
             
-            if not isinstance(record_data, dict):
-                self.logger.error("Invalid record structure")
-                return None
+            # Generate record ID
+            record_id = self._generate_daily_record_id({
+                'congress': congress,
+                'volume': volume,
+                'issue': issue,
+                'date': date
+            })
 
-            # Generate ID using date and section
-            record_id = f"dcr-{record_data.get('date', '')}-{record_data.get('section', '')}"
+            if not record_id:
+                self.logger.error("Failed to generate daily congressional record ID - missing required fields")
+                self.logger.error(f"Raw record data: {json.dumps(record_data, indent=2)}")
+                return None
 
             transformed_record = {
                 'id': record_id,
                 'type': 'daily-congressional-record',
-                'congress': current_congress,
+                'congress': congress,
                 'update_date': record_data.get('updateDate', ''),
                 'version': 1,
-                'date': record_data.get('date', ''),
-                'section': record_data.get('section', ''),
-                'pages': record_data.get('pages', ''),
+                'volume': volume,
+                'issue': issue,
+                'date': date,
+                'chamber': record_data.get('chamber', '').lower(),
+                'pages': record_data.get('pages', []),
                 'url': record_data.get('url', '')
             }
 
-            # TODO: Add validation once schema is defined
-            return transformed_record
+            # Log the transformed data for debugging
+            self.logger.debug(f"Transformed daily record data: {json.dumps(transformed_record, indent=2)}")
+
+            is_valid, errors = self.validator.validate_daily_congressional_record(transformed_record)
+            if not is_valid:
+                self.logger.error(f"Daily congressional record {record_id} failed validation: {errors}")
+                self.logger.error(f"Invalid record data: {json.dumps(transformed_record, indent=2)}")
+                return None
+
+            return self.validator.cleanup_daily_congressional_record(transformed_record)
 
         except Exception as e:
             self.logger.error(f"Failed to transform daily congressional record: {str(e)}")
+            self.logger.error(f"Raw record data: {json.dumps(record, indent=2)}")
             return None
 
     """

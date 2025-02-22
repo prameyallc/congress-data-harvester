@@ -2,6 +2,7 @@ import re
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 import logging
+import json
 
 class DataValidator:
     """Validates and cleanups Congress.gov data before storage"""
@@ -47,7 +48,7 @@ class DataValidator:
             'member': self.validate_member,
             'summaries': self.validate_summary,
             'committee-print': self.validate_committee_print,
-            'daily-congressional-record': self.validate_congressional_record_daily,
+            'daily-congressional-record': self.validate_daily_congressional_record,
             'bound-congressional-record': self.validate_bound_congressional_record,
             'committee-meeting': self.validate_committee_meeting
         }
@@ -147,14 +148,23 @@ class DataValidator:
             if not self._is_valid_date(amendment['update_date']):
                 errors.append(f"Invalid update_date format: {amendment['update_date']}")
 
+            # Type validation
+            valid_types = ['samdt', 'hamdt']
+            if amendment.get('type', '').lower() not in valid_types:
+                errors.append(f"Invalid amendment type: {amendment.get('type')}")
+
         is_valid = len(errors) == 0
+        if not is_valid:
+            self.logger.warning(f"Amendment validation failed: {', '.join(errors)}")
+            self.logger.debug(f"Invalid amendment data: {json.dumps(amendment, indent=2)}")
+
         self._update_validation_stats('amendment', is_valid)
         return is_valid, errors
 
     def validate_nomination(self, nomination: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """Validate nomination data structure"""
         errors = []
-        required_fields = ['id', 'congress', 'nomination_number', 'update_date']
+        required_fields = ['id', 'congress', 'update_date', 'number', 'description']
 
         for field in required_fields:
             if field not in nomination:
@@ -171,7 +181,7 @@ class DataValidator:
 
             # Nomination number validation
             try:
-                nom_num = int(nomination['nomination_number'])
+                nom_num = int(nomination['number'])
                 if nom_num < 1:
                     errors.append("Nomination number must be positive")
             except (ValueError, TypeError):
@@ -181,7 +191,19 @@ class DataValidator:
             if not self._is_valid_date(nomination['update_date']):
                 errors.append(f"Invalid update_date format: {nomination['update_date']}")
 
+            # Nomination type validation
+            if 'nominationType' in nomination:
+                if not isinstance(nomination['nominationType'], dict):
+                    errors.append("nominationType must be a dictionary")
+                else:
+                    if 'isCivilian' in nomination['nominationType'] and not isinstance(nomination['nominationType']['isCivilian'], bool):
+                        errors.append("nominationType.isCivilian must be a boolean")
+
         is_valid = len(errors) == 0
+        if not is_valid:
+            self.logger.warning(f"Nomination validation failed: {', '.join(errors)}")
+            self.logger.debug(f"Invalid nomination data: {json.dumps(nomination, indent=2)}")
+
         self._update_validation_stats('nomination', is_valid)
         return is_valid, errors
 
@@ -507,9 +529,23 @@ class DataValidator:
                 except (ValueError, TypeError):
                     self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
 
+        # Normalize type field
+        if 'type' in cleaned:
+            cleaned['type'] = cleaned['type'].lower().strip()
+
         # Normalize text fields
         if 'purpose' in cleaned:
             cleaned['purpose'] = ' '.join(cleaned['purpose'].split())
+
+        # Ensure latest_action is a dictionary
+        if 'latest_action' not in cleaned or not isinstance(cleaned['latest_action'], dict):
+            cleaned['latest_action'] = {}
+        elif 'latest_action' in cleaned and isinstance(cleaned['latest_action'], dict):
+            if 'text' in cleaned['latest_action']:
+                cleaned['latest_action']['text'] = ' '.join(cleaned['latest_action']['text'].split())
+
+        # Remove any empty fields
+        cleaned = {k: v for k, v in cleaned.items() if v is not None and v != ''}
 
         return cleaned
 
@@ -518,7 +554,7 @@ class DataValidator:
         cleaned = nomination.copy()
 
         # Convert numeric fields
-        for field in ['congress', 'nomination_number']:
+        for field in ['congress', 'number']:
             if field in cleaned:
                 try:
                     cleaned[field] = int(cleaned[field])
@@ -526,8 +562,21 @@ class DataValidator:
                     self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
 
         # Normalize text fields
-        if 'description' in cleaned:
-            cleaned['description'] = ' '.join(cleaned['description'].split())
+        for field in ['description', 'organization']:
+            if field in cleaned:
+                cleaned[field] = ' '.join(cleaned[field].split())
+
+        # Ensure nomination type is properly structured
+        if 'nominationType' not in cleaned or not isinstance(cleaned['nominationType'], dict):
+            cleaned['nominationType'] = {'isCivilian': True}
+
+        # Ensure latest action is properly structured
+        if 'latestAction' in cleaned and isinstance(cleaned['latestAction'], dict):
+            if 'text' in cleaned['latestAction']:
+                cleaned['latestAction']['text'] = ' '.join(cleaned['latestAction']['text'].split())
+
+        # Remove any empty fields
+        cleaned = {k: v for k, v in cleaned.items() if v is not None and v != ''}
 
         return cleaned
 
@@ -575,7 +624,7 @@ class DataValidator:
     def validate_committee(self, committee: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """Validate committee data structure"""
         errors = []
-        required_fields = ['id', 'congress', 'update_date', 'name', 'chamber']
+        required_fields = ['id', 'congress', 'update_date', 'name', 'chamber', 'committee_type']
 
         for field in required_fields:
             if field not in committee:
@@ -594,13 +643,34 @@ class DataValidator:
             if not self._is_valid_date(committee['update_date']):
                 errors.append(f"Invalid update_date format: {committee['update_date']}")
 
+            # Chamber validation
+            valid_chambers = ['house', 'senate', 'joint']
+            if committee.get('chamber', '').lower() not in valid_chambers:
+                errors.append(f"Invalid chamber: {committee.get('chamber')}")
+
+            # Committee type validation
+            valid_types = ['standing', 'select', 'joint', 'special', 'subcommittee']
+            if committee.get('committee_type', '').lower() not in valid_types:
+                errors.append(f"Invalid committee_type: {committee.get('committee_type')}")
+
             # Subcommittees validation
             if 'subcommittees' in committee:
                 if not isinstance(committee['subcommittees'], list):
                     errors.append("Subcommittees must be a list")
+                else:
+                    for subcommittee in committee['subcommittees']:
+                        if not isinstance(subcommittee, dict):
+                            errors.append("Each subcommittee must be a dictionary")
+                        elif 'name' not in subcommittee:
+                            errors.append("Each subcommittee must have a name")
 
         is_valid = len(errors) == 0
         self._update_validation_stats('committee', is_valid)
+
+        if not is_valid:
+            self.logger.warning(f"Committee validation failed: {', '.join(errors)}")
+            self.logger.debug(f"Invalid committee data: {json.dumps(committee, indent=2)}")
+
         return is_valid, errors
 
     def cleanup_committee(self, committee: Dict[str, Any]) -> Dict[str, Any]:
@@ -615,17 +685,30 @@ class DataValidator:
                 self.logger.warning(f"Could not convert congress to integer: {cleaned['congress']}")
 
         # Normalize text fields
-        for field in ['name', 'committee_type']:
+        for field in ['name', 'committee_type', 'chamber']:
             if field in cleaned:
-                cleaned[field] = ' '.join(cleaned[field].split())
+                cleaned[field] = cleaned[field].lower().strip()
 
         # Ensure subcommittees is a list
         if 'subcommittees' not in cleaned or not isinstance(cleaned['subcommittees'], list):
             cleaned['subcommittees'] = []
+        else:
+            # Clean subcommittee data
+            cleaned_subcommittees = []
+            for subcommittee in cleaned['subcommittees']:
+                if isinstance(subcommittee, dict):
+                    cleaned_sub = subcommittee.copy()
+                    if 'name' in cleaned_sub:
+                        cleaned_sub['name'] = cleaned_sub['name'].strip()
+                    cleaned_subcommittees.append(cleaned_sub)
+            cleaned['subcommittees'] = cleaned_subcommittees
 
         # Ensure parent_committee is a dictionary
         if 'parent_committee' not in cleaned or not isinstance(cleaned['parent_committee'], dict):
             cleaned['parent_committee'] = {}
+
+        # Remove any empty fields
+        cleaned = {k: v for k, v in cleaned.items() if v is not None and v != ''}
 
         return cleaned
 
@@ -766,7 +849,7 @@ class DataValidator:
                 else:
                     for ref in comm['referred_to']:
                         if not isinstance(ref, dict):
-                            errors.append("Each referral must be a dictionary")
+                            errors.append("Each referral must be adictionary")
                         elif 'committee' not in ref or 'date' not in ref:
                             errors.append("Each referral must contain 'committee' and 'date'")
 
@@ -811,7 +894,7 @@ class DataValidator:
             try:
                 congress_num = int(member['congress'])
                 if congress_num < 1 or congress_num > 150:
-                    errors.append(f"Invalid congress number:{congress_num}")
+                    errors.append(f"Invalid congress number: {congress_num}")
             except (ValueError, TypeError):
                 errors.append("Congress must be a valid number")
 
@@ -819,10 +902,10 @@ class DataValidator:
             if not self._is_valid_date(member['update_date']):
                 errors.append(f"Invalid update_date format: {member['update_date']}")
 
-            # Served until date validation if present
-            if member.get('served_until'):
-                if not self._is_valid_date(member['served_until']):
-                    errors.append(f"Invalid served_until format: {member['served_until']}")
+            # Role validation
+            valid_roles = ['representative', 'senator', 'delegate', 'commissioner']
+            if 'role' in member and member['role'].lower() not in valid_roles:
+                errors.append(f"Invalid role: {member['role']}")
 
         is_valid = len(errors) == 0
         self._update_validation_stats('member', is_valid)
@@ -934,10 +1017,10 @@ class DataValidator:
         self._update_validation_stats('committee-print', is_valid)
         return is_valid, errors
 
-    def validate_congressional_record_daily(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    def validate_daily_congressional_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """Validate daily congressional record data structure"""
         errors = []
-        required_fields = ['id', 'congress', 'update_date', 'date', 'type']
+        required_fields = ['id', 'congress', 'update_date', 'date', 'volume', 'issue', 'chamber']
 
         for field in required_fields:
             if field not in record:
@@ -957,6 +1040,22 @@ class DataValidator:
                 if not self._is_valid_date(record[date_field]):
                     errors.append(f"Invalid {date_field} format: {record[date_field]}")
 
+            # Volume and issue validation
+            if 'volume' in record and not str(record['volume']).strip():
+                errors.append("Volume cannot be empty")
+            if 'issue' in record and not str(record['issue']).strip():
+                errors.append("Issue cannot be empty")
+
+            # Chamber validation
+            valid_chambers = ['house', 'senate', 'joint']
+            if record.get('chamber', '').lower() not in valid_chambers:
+                errors.append(f"Invalid chamber: {record.get('chamber')}")
+
+            # Pages validation
+            if 'pages' in record:
+                if not isinstance(record['pages'], list):
+                    errors.append("Pages must be a list")
+
         is_valid = len(errors) == 0
         self._update_validation_stats('daily-congressional-record', is_valid)
         return is_valid, errors
@@ -964,7 +1063,7 @@ class DataValidator:
     def validate_bound_congressional_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """Validate bound congressional record data structure"""
         errors = []
-        required_fields = ['id', 'congress', 'update_date', 'volume', 'pages']
+        required_fields = ['id', 'congress', 'update_date', 'volume', 'date']
 
         for field in required_fields:
             if field not in record:
@@ -980,17 +1079,18 @@ class DataValidator:
                 errors.append("Congress must be a valid number")
 
             # Date validation
-            if not self._is_valid_date(record['update_date']):
-                errors.append(f"Invalid update_date format: {record['update_date']}")
+            for date_field in ['update_date', 'date']:
+                if not self._is_valid_date(record[date_field]):
+                    errors.append(f"Invalid {date_field} format: {record[date_field]}")
 
-            # Pages validation
-            if 'pages' in record:
-                pages = record['pages']
-                if not isinstance(pages, dict):
-                    errors.append("Pages must be a dictionary")
-                else:
-                    if 'start' not in pages or 'end' not in pages:
-                        errors.append("Pages must contain 'start' and 'end' fields")
+            # Volume validation
+            if 'volume' in record:
+                try:
+                    vol_num = int(record['volume'])
+                    if vol_num < 1:
+                        errors.append("Volume number must be positive")
+                except (ValueError, TypeError):
+                    errors.append("Volume must be a valid number")
 
         is_valid = len(errors) == 0
         self._update_validation_stats('bound-congressional-record', is_valid)
@@ -1021,6 +1121,7 @@ class DataValidator:
             cleaned['text_versions'] = []
 
         return cleaned
+
     def validate_committee_meeting(self, meeting: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """Validate committee meeting data structure"""
         errors = []
@@ -1070,33 +1171,6 @@ class DataValidator:
 
         return cleaned
 
-    def validate_daily_congressional_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Validate daily congressional record data structure"""
-        errors = []
-        required_fields = ['id', 'congress', 'update_date', 'chamber', 'date']
-
-        for field in required_fields:
-            if field not in record:
-                errors.append(f"Missing required field: {field}")
-
-        if not errors:
-            # Congress number validation
-            try:
-                congress_num = int(record['congress'])
-                if congress_num < 1 or congress_num > 150:
-                    errors.append(f"Invalid congress number: {congress_num}")
-            except (ValueError, TypeError):
-                errors.append("Congress must be a valid number")
-
-            # Date validations
-            for date_field in ['update_date', 'date']:
-                if not self._is_valid_date(record[date_field]):
-                    errors.append(f"Invalid {date_field} format: {record[date_field]}")
-
-        is_valid = len(errors) == 0
-        self._update_validation_stats('daily-congressional-record', is_valid)
-        return is_valid, errors
-
     def cleanup_daily_congressional_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """Clean and normalize daily congressional record data"""
         cleaned = record.copy()
@@ -1108,52 +1182,23 @@ class DataValidator:
             except (ValueError, TypeError):
                 self.logger.warning(f"Could not convert congress to integer: {cleaned['congress']}")
 
-        # Normalize text fields
-        for field in ['chamber', 'description']:
+        # Normalize chamber to lowercase
+        if 'chamber' in cleaned:
+            cleaned['chamber'] = cleaned['chamber'].lower()
+
+        # Ensure volume and issue are strings
+        for field in ['volume', 'issue']:
             if field in cleaned:
-                cleaned[field] = ' '.join(cleaned[field].split())
+                cleaned[field] = str(cleaned[field])
 
         # Ensure pages is a list
         if 'pages' not in cleaned or not isinstance(cleaned['pages'], list):
             cleaned['pages'] = []
 
+        # Remove any empty fields
+        cleaned = {k: v for k, v in cleaned.items() if v is not None and v != ''}
+
         return cleaned
-
-    def validate_bound_congressional_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Validate bound congressional record data structure"""
-        errors = []
-        required_fields = ['id', 'congress', 'update_date', 'volume', 'date']
-
-        for field in required_fields:
-            if field not in record:
-                errors.append(f"Missing required field: {field}")
-
-        if not errors:
-            # Congress number validation
-            try:
-                congress_num = int(record['congress'])
-                if congress_num < 1 or congress_num > 150:
-                    errors.append(f"Invalid congress number: {congress_num}")
-            except (ValueError, TypeError):
-                errors.append("Congress must be a valid number")
-
-            # Date validation
-            for date_field in ['update_date', 'date']:
-                if not self._is_valid_date(record[date_field]):
-                    errors.append(f"Invalid {date_field} format: {record[date_field]}")
-
-            # Volume validation
-            if 'volume' in record:
-                try:
-                    vol_num = int(record['volume'])
-                    if vol_num < 1:
-                        errors.append("Volume number must be positive")
-                except (ValueError, TypeError):
-                    errors.append("Volume must be a valid number")
-
-        is_valid = len(errors) == 0
-        self._update_validation_stats('bound-congressional-record', is_valid)
-        return is_valid, errors
 
     def cleanup_bound_congressional_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """Clean and normalize bound congressional record data"""
