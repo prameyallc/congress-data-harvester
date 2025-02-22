@@ -107,15 +107,18 @@ class DynamoHandler:
             table = self.dynamodb.create_table(
                 TableName=self.table_name,
                 KeySchema=[
-                    {'AttributeName': 'id', 'KeyType': 'HASH'},  # Partition key
-                    {'AttributeName': 'update_date', 'KeyType': 'RANGE'}  # Sort key
+                    {'AttributeName': 'id', 'KeyType': 'HASH'}  # Partition key
                 ],
                 AttributeDefinitions=[
+                    # Primary key
                     {'AttributeName': 'id', 'AttributeType': 'S'},
-                    {'AttributeName': 'update_date', 'AttributeType': 'S'},
+                    # GSI attributes
                     {'AttributeName': 'type', 'AttributeType': 'S'},
+                    {'AttributeName': 'update_date', 'AttributeType': 'S'},
                     {'AttributeName': 'congress', 'AttributeType': 'N'},
-                    {'AttributeName': 'number', 'AttributeType': 'N'}
+                    {'AttributeName': 'chamber', 'AttributeType': 'S'},
+                    {'AttributeName': 'date', 'AttributeType': 'S'},
+                    {'AttributeName': 'version', 'AttributeType': 'N'}
                 ],
                 GlobalSecondaryIndexes=[
                     # GSI for querying by type and update date
@@ -131,12 +134,38 @@ class DynamoHandler:
                             'WriteCapacityUnits': 5
                         }
                     },
-                    # GSI for querying by congress
+                    # GSI for querying by congress and type
                     {
-                        'IndexName': 'congress-number-index',
+                        'IndexName': 'congress-type-index',
                         'KeySchema': [
                             {'AttributeName': 'congress', 'KeyType': 'HASH'},
-                            {'AttributeName': 'number', 'KeyType': 'RANGE'}
+                            {'AttributeName': 'type', 'KeyType': 'RANGE'}
+                        ],
+                        'Projection': {'ProjectionType': 'ALL'},
+                        'ProvisionedThroughput': {
+                            'ReadCapacityUnits': 5,
+                            'WriteCapacityUnits': 5
+                        }
+                    },
+                    # GSI for querying by chamber and date
+                    {
+                        'IndexName': 'chamber-date-index',
+                        'KeySchema': [
+                            {'AttributeName': 'chamber', 'KeyType': 'HASH'},
+                            {'AttributeName': 'date', 'KeyType': 'RANGE'}
+                        ],
+                        'Projection': {'ProjectionType': 'ALL'},
+                        'ProvisionedThroughput': {
+                            'ReadCapacityUnits': 5,
+                            'WriteCapacityUnits': 5
+                        }
+                    },
+                    # GSI for querying by version and update_date
+                    {
+                        'IndexName': 'version-update_date-index',
+                        'KeySchema': [
+                            {'AttributeName': 'version', 'KeyType': 'HASH'},
+                            {'AttributeName': 'update_date', 'KeyType': 'RANGE'}
                         ],
                         'Projection': {'ProjectionType': 'ALL'},
                         'ProvisionedThroughput': {
@@ -416,3 +445,68 @@ class DynamoHandler:
         except ClientError as e:
             self.logger.error(f"DynamoDB scan operation failed for type {item_type}: {str(e)}")
             raise Exception(f"DynamoDB scan operation failed: {str(e)}")
+
+    def query_by_congress_and_type(self, congress: int, item_type: str) -> List[Dict[str, Any]]:
+        """Query items by congress and type using congress-type-index"""
+        try:
+            response = self.table.query(
+                IndexName='congress-type-index',
+                KeyConditionExpression='congress = :congress AND #type = :type',
+                ExpressionAttributeNames={
+                    '#type': 'type'
+                },
+                ExpressionAttributeValues={
+                    ':congress': congress,
+                    ':type': item_type
+                }
+            )
+            items = response.get('Items', [])
+            self.logger.info(f"Retrieved {len(items)} items for congress {congress} and type {item_type}")
+            return items
+
+        except ClientError as e:
+            self.logger.error(f"DynamoDB query operation failed: {str(e)}")
+            raise Exception(f"DynamoDB query operation failed: {str(e)}")
+
+    def query_by_chamber_and_date_range(self, chamber: str, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+        """Query items by chamber and date range using chamber-date-index"""
+        try:
+            response = self.table.query(
+                IndexName='chamber-date-index',
+                KeyConditionExpression='chamber = :chamber AND #date BETWEEN :start_date AND :end_date',
+                ExpressionAttributeNames={
+                    '#date': 'date'
+                },
+                ExpressionAttributeValues={
+                    ':chamber': chamber,
+                    ':start_date': start_date,
+                    ':end_date': end_date
+                }
+            )
+            items = response.get('Items', [])
+            self.logger.info(f"Retrieved {len(items)} items for chamber {chamber} between {start_date} and {end_date}")
+            return items
+
+        except ClientError as e:
+            self.logger.error(f"DynamoDB query operation failed: {str(e)}")
+            raise Exception(f"DynamoDB query operation failed: {str(e)}")
+
+    def query_by_version_and_update_date(self, version: int, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+        """Query items by version and update date range using version-update_date-index"""
+        try:
+            response = self.table.query(
+                IndexName='version-update_date-index',
+                KeyConditionExpression='version = :version AND update_date BETWEEN :start_date AND :end_date',
+                ExpressionAttributeValues={
+                    ':version': version,
+                    ':start_date': start_date,
+                    ':end_date': end_date
+                }
+            )
+            items = response.get('Items', [])
+            self.logger.info(f"Retrieved {len(items)} items for version {version} between {start_date} and {end_date}")
+            return items
+
+        except ClientError as e:
+            self.logger.error(f"DynamoDB query operation failed: {str(e)}")
+            raise Exception(f"DynamoDB query operation failed: {str(e)}")

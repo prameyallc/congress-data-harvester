@@ -57,7 +57,7 @@ task = "packager.installForAll"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python test_dynamo.py --verbose"
+args = "python test_dynamo.py --verbose && python test_committee_data.py --verbose"
 
 [[workflows.workflow]]
 name = "Health Check"
