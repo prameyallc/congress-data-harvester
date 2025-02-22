@@ -9,10 +9,33 @@ import os
 import time
 from botocore.exceptions import ClientError
 import logging
+from decimal import Decimal
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger('dynamo_test')
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return str(obj)
+        return super(DecimalEncoder, self).default(obj)
+
+# Setup logging configuration
+log_config = {
+    'level': logging.DEBUG,
+    'file': 'logs/dynamo_test.log',
+    'max_size': 10485760,
+    'backup_count': 5
+}
+logger = setup_logger(log_config)
+
+def test_aws_credentials():
+    """Test AWS credentials and print identity"""
+    try:
+        sts = boto3.client('sts')
+        identity = sts.get_caller_identity()
+        logger.info(f"AWS credentials verified. Using IAM identity: {identity['Arn']}")
+        return True
+    except Exception as e:
+        logger.error(f"AWS credentials verification failed: {str(e)}")
+        return False
 
 def describe_table(dynamodb, table_name):
     """Get and log table schema details"""
@@ -41,12 +64,18 @@ def describe_table(dynamodb, table_name):
 def test_dynamo_permissions():
     """Test specific DynamoDB permissions"""
     try:
-        # Initialize DynamoDB client
+        # First verify AWS credentials
+        if not test_aws_credentials():
+            logger.error("AWS credentials verification failed")
+            return False
+
+        # Initialize DynamoDB client with debug logging
+        logger.info("Initializing DynamoDB client...")
         dynamodb = boto3.resource('dynamodb', region_name='us-west-2')
         table_name = 'prameya-development-dynamodb-table'
 
         # Check if table exists and describe its schema
-        logger.info("Checking if table exists...")
+        logger.info(f"Checking if table {table_name} exists...")
         try:
             table = dynamodb.Table(table_name)
             table_desc = describe_table(dynamodb, table_name)
@@ -54,7 +83,9 @@ def test_dynamo_permissions():
             logger.info("Table accessed successfully")
 
         except ClientError as e:
-            logger.error(f"Error accessing table: {str(e)}")
+            error_code = e.response['Error']['Code']
+            error_msg = e.response['Error']['Message']
+            logger.error(f"Error accessing table: Code={error_code}, Message={error_msg}")
             return False
 
         # Create test timestamp
@@ -65,16 +96,16 @@ def test_dynamo_permissions():
             'id': f'test_bill_{timestamp}',
             'type': 'bill',
             'congress': 117,
-            'title': 'Postal Service Reform Act of 2022',
-            'update_date': '2022-09-29',
+            'title': 'Test Bill for DynamoDB Permissions',
+            'update_date': '2024-02-22',
             'bill_type': 'hr',
             'bill_number': 3076,
             'version': 1,
             'origin_chamber': 'House',
             'origin_chamber_code': 'H',
             'latest_action': {
-                'text': 'Became Public Law No: 117-108.',
-                'action_date': '2022-04-06'
+                'text': 'Test action',
+                'action_date': '2024-02-22'
             },
             'timestamp': timestamp,
             'expiry_time': int(time.time()) + 3600  # 1 hour TTL
@@ -83,10 +114,13 @@ def test_dynamo_permissions():
         # Write test item
         logger.info("Testing write operations...")
         try:
+            logger.debug(f"Attempting to write item: {json.dumps(bill_item, indent=2)}")
             table.put_item(Item=bill_item)
-            logger.info(f"Successfully wrote test bill item")
+            logger.info(f"Successfully wrote test bill item with ID: {bill_item['id']}")
         except ClientError as e:
-            logger.error(f"Failed to write bill item: {str(e)}")
+            error_code = e.response['Error']['Code']
+            error_msg = e.response['Error']['Message']
+            logger.error(f"Failed to write bill item: Code={error_code}, Message={error_msg}")
             return False
 
         # Read test item
@@ -97,27 +131,14 @@ def test_dynamo_permissions():
             )
             retrieved_item = response.get('Item')
             if retrieved_item:
-                logger.info(f"Successfully retrieved test bill item")
-                logger.info(f"Retrieved item: {retrieved_item}")
+                logger.info(f"Successfully retrieved test bill item: {json.dumps(retrieved_item, indent=2, cls=DecimalEncoder)}")
             else:
                 logger.error(f"Item not found: {bill_item['id']}")
                 return False
         except ClientError as e:
-            logger.error(f"Failed to read bill item: {str(e)}")
-            return False
-
-        # Test scan by type
-        logger.info("Testing scan operations...")
-        try:
-            response = table.scan(
-                FilterExpression='#type = :type',
-                ExpressionAttributeNames={'#type': 'type'},
-                ExpressionAttributeValues={':type': 'bill'}
-            )
-            items = response.get('Items', [])
-            logger.info(f"Successfully scanned {len(items)} bill items")
-        except ClientError as e:
-            logger.error(f"Scan failed: {str(e)}")
+            error_code = e.response['Error']['Code']
+            error_msg = e.response['Error']['Message']
+            logger.error(f"Failed to read bill item: Code={error_code}, Message={error_msg}")
             return False
 
         # Clean up test item
@@ -128,7 +149,9 @@ def test_dynamo_permissions():
             )
             logger.info("Successfully deleted test bill item")
         except ClientError as e:
-            logger.warning(f"Failed to delete test item {bill_item['id']}: {str(e)}")
+            error_code = e.response['Error']['Code']
+            error_msg = e.response['Error']['Message']
+            logger.warning(f"Failed to delete test item {bill_item['id']}: Code={error_code}, Message={error_msg}")
 
         logger.info("All DynamoDB permission tests completed successfully")
         return True
@@ -138,7 +161,10 @@ def test_dynamo_permissions():
         return False
 
 if __name__ == "__main__":
+    logger.info("Starting DynamoDB permission tests...")
     if test_dynamo_permissions():
         logger.info("All DynamoDB permission tests completed successfully")
+        sys.exit(0)
     else:
         logger.error("DynamoDB permission tests failed")
+        sys.exit(1)

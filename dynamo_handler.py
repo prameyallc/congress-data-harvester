@@ -4,6 +4,14 @@ from botocore.exceptions import ClientError
 import logging
 from monitoring import metrics
 from typing import Dict, List, Any, Optional, Tuple
+from decimal import Decimal
+import json
+
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return str(obj)
+        return super(DecimalEncoder, self).default(obj)
 
 class DynamoHandler:
     def __init__(self, config):
@@ -250,6 +258,8 @@ class DynamoHandler:
             if 'type' not in item:
                 item['type'] = 'unknown'
 
+            self.logger.debug(f"Attempting to store item: {json.dumps(item, indent=2, cls=DecimalEncoder)}")
+
             self.table.put_item(
                 Item=item,
                 ConditionExpression='attribute_not_exists(id) OR (attribute_exists(update_date) AND update_date < :new_update_date)',
@@ -266,7 +276,7 @@ class DynamoHandler:
                 duration=duration
             )
 
-            self.logger.debug(f"Successfully stored item with ID: {item['id']}")
+            self.logger.info(f"Successfully stored item with ID: {item['id']}")
 
         except ClientError as e:
             duration = time.time() - start_time
@@ -277,11 +287,14 @@ class DynamoHandler:
                 duration=duration
             )
 
-            if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+            error_code = e.response['Error']['Code']
+            error_msg = e.response['Error']['Message']
+
+            if error_code == 'ConditionalCheckFailedException':
                 self.logger.info(f"Skipping item {item['id']} as a newer version exists")
                 return
 
-            self.logger.error(f"DynamoDB operation failed for item {item['id']}: {str(e)}")
+            self.logger.error(f"DynamoDB operation failed for item {item['id']}: Code={error_code}, Message={error_msg}")
             raise
 
     def batch_store_items(self, items: List[Dict[str, Any]], ttl_hours: int = 0) -> Tuple[int, List[Dict[str, Any]]]:
@@ -294,9 +307,11 @@ class DynamoHandler:
 
         # Process items in batches of 25 (DynamoDB limit)
         batch_size = 25
-        for i in range(0, len(items), batch_size):
+        total_batches = len(items) // batch_size + (1 if len(items) % batch_size > 0 else 0)
+
+        for batch_num, i in enumerate(range(0, len(items), batch_size), 1):
             batch_items = items[i:i + batch_size]
-            self.logger.info(f"Processing batch of {len(batch_items)} items")
+            self.logger.info(f"Processing batch {batch_num}/{total_batches} with {len(batch_items)} items")
 
             start_time = time.time()
             try:
@@ -304,7 +319,7 @@ class DynamoHandler:
                     for item in batch_items:
                         try:
                             if 'id' not in item:
-                                self.logger.warning(f"Skipping item without ID: {item}")
+                                self.logger.warning(f"Skipping item without ID: {json.dumps(item, cls=DecimalEncoder)}")
                                 continue
 
                             # Add timestamp and TTL
@@ -316,7 +331,9 @@ class DynamoHandler:
                             if 'type' not in item:
                                 item['type'] = 'unknown'
 
-                            self.logger.info(f"Attempting to store item of type {item.get('type')} with ID: {item.get('id')}")
+                            self.logger.debug(f"Attempting to store item of type {item.get('type')} with ID: {item.get('id')}")
+                            self.logger.debug(f"Item content: {json.dumps(item, indent=2, cls=DecimalEncoder)}")
+
                             batch.put_item(Item=item)
                             successful_items += 1
                             self.logger.info(f"Successfully stored item with ID: {item.get('id')}")
@@ -356,6 +373,16 @@ class DynamoHandler:
                 } for item in batch_items])
 
         self.logger.info(f"Batch write completed: {successful_items} items successful, {len(failed_items)} failed")
+        if failed_items:
+            self.logger.warning("Failed items summary:")
+            failed_by_type = {}
+            for item in failed_items:
+                item_type = item['item'].get('type', 'unknown')
+                failed_by_type[item_type] = failed_by_type.get(item_type, 0) + 1
+
+            for item_type, count in failed_by_type.items():
+                self.logger.warning(f"  - {item_type}: {count} failed items")
+
         return successful_items, failed_items
 
     def get_item(self, item_id: str) -> Optional[Dict[str, Any]]:

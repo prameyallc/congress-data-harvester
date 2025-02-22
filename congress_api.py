@@ -385,6 +385,125 @@ class CongressAPI(CongressBaseAPI):
             self.logger.error(f"Failed to get data for date {date}: {str(e)}")
             raise
 
+    def _get_endpoint_data(self, endpoint_name: str, date_str: str, current_congress: int) -> List[Dict]:
+        """Get data for a specific endpoint and date"""
+        try:
+            self.logger.info(f"Fetching {endpoint_name} data for {date_str}")
+            
+            # Define endpoint-specific parameters
+            params = {
+                'format': 'json',
+                'fromDateTime': f"{date_str}T00:00:00Z",
+                'toDateTime': f"{date_str}T23:59:59Z",
+                'limit': 20
+            }
+            
+            # Add congress parameter for specific endpoints
+            if endpoint_name in ['committee', 'committee-meeting']:
+                params['congress'] = current_congress
+
+            all_items = []
+            offset = 0
+            
+            while True:
+                params['offset'] = offset
+                self.logger.debug(f"Making request to {endpoint_name} with params: {json.dumps(params, indent=2)}")
+                
+                response = self._make_request(endpoint_name, params)
+                self.logger.debug(f"Raw API response for {endpoint_name}: {json.dumps(response, indent=2)}")
+                
+                # Map endpoint names to their response keys (updated with actual API response keys)
+                endpoint_key_map = {
+                    'bill': 'bills',
+                    'amendment': 'amendments',
+                    'nomination': 'nominations',
+                    'treaty': 'treaties',
+                    'committee': 'committees',
+                    'hearing': 'hearings',
+                    'committee-report': 'committeeReports',
+                    'congressional-record': 'congressionalRecords',
+                    'house-communication': 'houseCommunications',
+                    'senate-communication': 'senateCommunications',
+                    'member': 'members',
+                    'summaries': 'summaries',
+                    'committee-print': 'committeePrints',
+                    'committee-meeting': 'committeeMeetings',
+                    'daily-congressional-record': 'dailyCongressionalRecords',
+                    'bound-congressional-record': 'boundCongressionalRecord'  # Fixed key name
+                }
+                
+                # Get the correct key for this endpoint
+                data_key = endpoint_key_map.get(endpoint_name)
+                if not data_key:
+                    self.logger.warning(f"No response key mapping found for endpoint {endpoint_name}")
+                    return []
+                
+                # Extract items from response
+                items = response.get(data_key, [])
+                if not items:
+                    self.logger.warning(f"No items found in response for {endpoint_name}")
+                    if response.get('pagination', {}).get('count', 0) > 0:
+                        self.logger.warning("Pagination indicates data exists but none was returned")
+                    break
+                    
+                self.logger.info(f"Retrieved {len(items)} items from {endpoint_name}")
+                
+                # Process each item based on its type
+                for item in items:
+                    try:
+                        processed_item = None
+                        
+                        # Log the raw item for debugging
+                        self.logger.debug(f"Processing {endpoint_name} item: {json.dumps(item, indent=2)}")
+                        
+                        if endpoint_name == 'bill':
+                            processed_item = self._process_bill(item, current_congress)
+                        elif endpoint_name == 'committee':
+                            processed_item = self._process_committee(item, current_congress)
+                        elif endpoint_name == 'hearing':
+                            processed_item = self._process_hearing(item, current_congress)
+                        elif endpoint_name == 'amendment':
+                            processed_item = self._process_amendment(item, current_congress)
+                        elif endpoint_name == 'nomination':
+                            processed_item = self._process_nomination(item, current_congress)
+                        elif endpoint_name == 'treaty':
+                            processed_item = self._process_treaty(item, current_congress)
+                        elif endpoint_name == 'bound-congressional-record':
+                            processed_item = self._process_bound_congressional_record(item, current_congress)
+                        # Add other endpoint processors as needed
+                        
+                        if processed_item:
+                            all_items.append(processed_item)
+                            self.logger.debug(f"Successfully processed {endpoint_name} item: {json.dumps(processed_item, indent=2)}")
+                        else:
+                            self.logger.warning(f"Failed to process {endpoint_name} item: {json.dumps(item, indent=2)}")
+                            
+                    except Exception as e:
+                        self.logger.error(f"Error processing {endpoint_name} item: {str(e)}")
+                        self.logger.error(f"Problematic item: {json.dumps(item, indent=2)}")
+                        continue
+                
+                # Check for pagination
+                pagination = response.get('pagination', {})
+                if not pagination.get('next'):
+                    self.logger.debug(f"No more pages for {endpoint_name}")
+                    break
+                    
+                offset += len(items)
+                
+                # Safety check to prevent infinite loops
+                if offset > 10000:  # Arbitrary limit
+                    self.logger.warning(f"Reached maximum offset for {endpoint_name}")
+                    break
+            
+            self.logger.info(f"Total {endpoint_name} items processed: {len(all_items)}")
+            return all_items
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get {endpoint_name} data: {str(e)}")
+            self.logger.error(f"Parameters used: {json.dumps(params, indent=2)}")
+            return []
+
     def _process_committee(self, committee: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a committee"""
         try:
@@ -2504,37 +2623,83 @@ class CongressAPI(CongressBaseAPI):
     def _process_bound_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a bound congressional record"""
         try:
-            if not isinstance(record, dict):
-                self.logger.error(f"Invalid record data type: {type(record)}")
+            record_data = record.get('boundCongressionalRecord', record)
+            if isinstance(record_data, str):
+                self.logger.error(f"Received string instead of dictionary for bound record: {record_data}")
                 return None
 
-            record_data = record.get('bound-congressional-record', record)
+            # Extract required fields with proper error handling
+            congress = int(record_data.get('congress', current_congress))
+            date = record_data.get('date', '')
+            session_number = record_data.get('sessionNumber', '')
+            volume_number = record_data.get('volumeNumber', '')
             
-            if not isinstance(record_data, dict):
-                self.logger.error("Invalid record structure")
-                return None
+            # Generate record ID
+            record_id = self._generate_bound_record_id({
+                'congress': congress,
+                'date': date,
+                'session_number': session_number,
+                'volume_number': volume_number
+            })
 
-            # Generate ID using volume and part
-            record_id = f"bcr-{record_data.get('volume', '')}-{record_data.get('part', '')}"
+            if not record_id:
+                self.logger.error("Failed to generate bound record ID - missing required fields")
+                self.logger.error(f"Raw record data: {json.dumps(record_data, indent=2)}")
+                return None
 
             transformed_record = {
                 'id': record_id,
                 'type': 'bound-congressional-record',
-                'congress': current_congress,
+                'congress': congress,
                 'update_date': record_data.get('updateDate', ''),
                 'version': 1,
-                'volume': record_data.get('volume', ''),
-                'part': record_data.get('part', ''),
-                'date': record_data.get('date', ''),
-                'pages': record_data.get('pages', ''),
+                'date': date,
+                'session_number': session_number,
+                'volume_number': volume_number,
                 'url': record_data.get('url', '')
             }
 
-            # TODO: Add validation once schema is defined
-            return transformed_record
+            is_valid, errors = self.validator.validate_bound_record(transformed_record)
+            if not is_valid:
+                self.logger.error(f"Bound record {record_id} failed validation: {errors}")
+                self.logger.error(f"Invalid record data: {json.dumps(transformed_record, indent=2)}")
+                return None
+
+            return self.validator.cleanup_bound_record(transformed_record)
 
         except Exception as e:
-            self.logger.error(f"Failed to transform bound congressional record: {str(e)}")
+            self.logger.error(f"Failed to transform bound record: {str(e)}")
+            self.logger.error(f"Raw record data: {json.dumps(record, indent=2)}")
+            return None
+
+    def _generate_bound_record_id(self, record: Dict) -> Optional[str]:
+        """Generate a bound congressional record ID from record data"""
+        try:
+            congress = str(record.get('congress', ''))
+            date = record.get('date', '')
+            session_number = str(record.get('session_number', ''))
+            volume_number = str(record.get('volume_number', ''))
+            
+            if not all([congress, date, session_number, volume_number]):
+                missing_fields = []
+                if not congress: missing_fields.append('congress')
+                if not date: missing_fields.append('date')
+                if not session_number: missing_fields.append('session_number')
+                if not volume_number: missing_fields.append('volume_number')
+                self.logger.warning(f"Missing required fields for bound record ID generation: {', '.join(missing_fields)}")
+                return None
+            
+            # Clean date to remove non-numeric characters
+            date_clean = re.sub(r'[^0-9]', '', date)
+            
+            # Generate final ID
+            record_id = f"{congress}-{date_clean}-s{session_number}-v{volume_number}"
+            self.logger.debug(f"Generated bound record ID: {record_id}")
+            return record_id
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate bound record ID: {str(e)}")
+            self.logger.error(f"Raw record data: {json.dumps(record, indent=2)}")
             return None
 
     def _process_member(self, member: Dict, current_congress: int) -> Optional[Dict]:

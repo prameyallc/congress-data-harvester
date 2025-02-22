@@ -301,7 +301,7 @@ class DataValidator:
     def validate_congressional_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """Validate congressional record data structure"""
         errors = []
-        required_fields = ['id', 'congress', 'update_date', 'record_type', 'date']
+        required_fields = ['Congress', 'Id', 'Issue', 'PublishDate', 'Volume']
 
         for field in required_fields:
             if field not in record:
@@ -310,27 +310,36 @@ class DataValidator:
         if not errors:
             # Congress number validation
             try:
-                congress_num = int(record['congress'])
+                congress_num = int(record['Congress'])
                 if congress_num < 1 or congress_num > 150:
                     errors.append(f"Invalid congress number: {congress_num}")
             except (ValueError, TypeError):
                 errors.append("Congress must be a valid number")
 
-            # Date validations
-            for date_field in ['update_date', 'date']:
-                if not self._is_valid_date(record[date_field]):
-                    errors.append(f"Invalid {date_field} format: {record[date_field]}")
+            # Date validation
+            if not self._is_valid_date(record['PublishDate']):
+                errors.append(f"Invalid PublishDate format: {record['PublishDate']}")
 
-            # Pages validation
-            if 'pages' in record:
-                pages = record['pages']
-                if not isinstance(pages, dict):
-                    errors.append("Pages must be a dictionary")
+            # Links validation
+            if 'Links' in record:
+                if not isinstance(record['Links'], dict):
+                    errors.append("Links must be a dictionary")
                 else:
-                    if 'start' not in pages or 'end' not in pages:
-                        errors.append("Pages must contain 'start' and 'end' fields")
+                    valid_sections = ['Digest', 'Senate', 'House', 'Remarks', 'FullRecord']
+                    for section in record['Links']:
+                        if section not in valid_sections:
+                            errors.append(f"Invalid section in Links: {section}")
+                        elif not isinstance(record['Links'][section], dict):
+                            errors.append(f"Section {section} must be a dictionary")
+                        elif 'PDF' in record['Links'][section]:
+                            if not isinstance(record['Links'][section]['PDF'], list):
+                                errors.append(f"PDF in section {section} must be a list")
 
         is_valid = len(errors) == 0
+        if not is_valid:
+            self.logger.warning(f"Congressional record validation failed: {', '.join(errors)}")
+            self.logger.debug(f"Invalid record data: {json.dumps(record, indent=2)}")
+
         self._update_validation_stats('congressional-record', is_valid)
         return is_valid, errors
 
@@ -339,20 +348,50 @@ class DataValidator:
         cleaned = record.copy()
 
         # Convert congress to integer
-        if 'congress' in cleaned:
+        if 'Congress' in cleaned:
             try:
-                cleaned['congress'] = int(cleaned['congress'])
+                cleaned['congress'] = int(cleaned['Congress'])
+                del cleaned['Congress']  # Remove original field after conversion
             except (ValueError, TypeError):
-                self.logger.warning(f"Could not convert congress to integer: {cleaned['congress']}")
+                self.logger.warning(f"Could not convert congress to integer: {cleaned['Congress']}")
 
-        # Normalize text fields
-        for field in ['title', 'record_type', 'session']:
-            if field in cleaned:
-                cleaned[field] = ' '.join(cleaned[field].split())
+        # Normalize ID
+        if 'Id' in cleaned:
+            cleaned['id'] = str(cleaned['Id'])
+            del cleaned['Id']
 
-        # Ensure pages structure
-        if 'pages' not in cleaned or not isinstance(cleaned['pages'], dict):
-            cleaned['pages'] = {'start': '', 'end': ''}
+        # Add type field for DynamoDB
+        cleaned['type'] = 'congressional-record'
+
+        # Normalize dates
+        if 'PublishDate' in cleaned:
+            cleaned['update_date'] = cleaned['PublishDate']
+            del cleaned['PublishDate']
+
+        # Ensure Links is properly structured
+        if 'Links' in cleaned and isinstance(cleaned['Links'], dict):
+            cleaned['sections'] = {}
+            for section, content in cleaned['Links'].items():
+                if isinstance(content, dict) and 'PDF' in content:
+                    cleaned['sections'][section.lower()] = {
+                        'label': content.get('Label', ''),
+                        'ordinal': content.get('Ordinal', 0),
+                        'pdfs': [pdf['Url'] for pdf in content['PDF'] if isinstance(pdf, dict) and 'Url' in pdf]
+                    }
+            del cleaned['Links']
+
+        # Convert volume to string if present
+        if 'Volume' in cleaned:
+            cleaned['volume'] = str(cleaned['Volume'])
+            del cleaned['Volume']
+
+        # Convert issue to string if present
+        if 'Issue' in cleaned:
+            cleaned['issue'] = str(cleaned['Issue'])
+            del cleaned['Issue']
+
+        # Remove any empty fields
+        cleaned = {k: v for k, v in cleaned.items() if v is not None and v != ''}
 
         return cleaned
 
@@ -756,7 +795,7 @@ class DataValidator:
                 cleaned[field] = ' '.join(cleaned[field].split())
 
         # Ensure documents is a list
-        if 'documents' not in cleaned or not isinstance(cleaned['documents'], list):
+        if 'documents' not in cleaned or notisinstance(cleaned['documents'], list):
             cleaned['documents'] = []
 
         return cleaned
