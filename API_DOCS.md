@@ -1,285 +1,417 @@
-# Congress Data API Documentation
+# API Documentation
 
-## Introduction
-
-The Congress Data API provides programmatic access to Congress.gov data stored in DynamoDB. This API allows you to query information about bills, committees, hearings, amendments, nominations, and treaties with flexible filtering options.
+This document provides detailed information about the Congress Data API endpoints, request parameters, and responses.
 
 ## Base URL
 
 ```
-https://your-replit-url.repl.co
+http://localhost:5000
 ```
 
 ## Authentication
 
-Currently, the API does not require authentication. Future versions will implement API key authentication for production use.
+Currently, the API does not require authentication for local development. For production deployments, implement appropriate authentication mechanisms.
 
-## Interactive Documentation
+## API Endpoints
 
-Interactive API documentation is available via Swagger UI at:
+### Home Endpoint
+
+Provides general information about the API.
 
 ```
-/swagger/
+GET /
 ```
 
-This interface allows you to:
-- Explore available endpoints
-- View request/response schemas
-- Test API calls directly from your browser
-
-## Available Endpoints
-
-| Endpoint | Description | Response Type |
-|----------|-------------|---------------|
-| `GET /api/bills` | Retrieve bills with filtering | List of bills |
-| `GET /api/committees` | Retrieve committees with filtering | List of committees |
-| `GET /api/hearings` | Retrieve hearings with filtering | List of hearings |
-| `GET /api/amendments` | Retrieve amendments with filtering | List of amendments |
-| `GET /api/nominations` | Retrieve nominations with filtering | List of nominations |
-| `GET /api/treaties` | Retrieve treaties with filtering | List of treaties |
-
-## Common Query Parameters
-
-All endpoints support the following query parameters:
-
-| Parameter | Type | Description | Example |
-|-----------|------|-------------|---------|
-| `congress` | Integer | Filter by congress number | `117` |
-| `start_date` | String (YYYY-MM-DD) | Filter by start date | `2024-01-01` |
-| `end_date` | String (YYYY-MM-DD) | Filter by end date | `2024-01-31` |
-| `limit` | Integer | Maximum number of results to return (default: 20, max: 100) | `50` |
-| `next_token` | String | Token for pagination | See pagination section |
-
-## Endpoint-Specific Parameters
-
-### Bills (`/api/bills`)
-- `bill_type`: Filter by bill type (e.g., `hr`, `s`)
-
-### Committees (`/api/committees`)
-- `chamber`: Filter by chamber (`House`, `Senate`)
-
-### Hearings (`/api/hearings`)
-- `committee`: Filter by committee system code
-- `chamber`: Filter by chamber (`House`, `Senate`)
-
-### Amendments (`/api/amendments`)
-- `amendment_type`: Filter by amendment type
-
-### Nominations (`/api/nominations`)
-- `organization`: Filter by organization
-
-### Treaties (`/api/treaties`)
-- `country`: Filter by country
-
-## Response Format
-
-All responses are returned in JSON format and follow a consistent structure:
+**Response:**
 
 ```json
 {
-  "data_type": [
+  "name": "Congress Data API",
+  "version": "1.0.0",
+  "description": "API for accessing Congress.gov data",
+  "documentation": "/swagger/"
+}
+```
+
+### Bills
+
+Retrieve bills with optional filtering by congress, bill_type, and date range.
+
+```
+GET /api/bills
+```
+
+**Query Parameters:**
+
+| Parameter   | Type    | Description                                        | Example      |
+|-------------|---------|----------------------------------------------------|--------------|
+| congress    | integer | Filter by congress number                           | 117          |
+| bill_type   | string  | Filter by bill type (e.g., hr, s)                  | hr           |
+| start_date  | string  | Filter by update date (start date, YYYY-MM-DD)     | 2024-01-01   |
+| end_date    | string  | Filter by update date (end date, YYYY-MM-DD)       | 2024-01-31   |
+| limit       | integer | Maximum number of results to return (default: 20)  | 50           |
+
+**Response:**
+
+```json
+{
+  "bills": [
     {
-      "id": "unique-identifier",
-      "type": "data-type",
+      "bill_id": "117-hr1234",
       "congress": 117,
-      "update_date": "2024-01-20",
-      ...other fields specific to the data type
+      "bill_type": "hr",
+      "bill_number": "1234",
+      "title": "Example Bill Title",
+      "introduced_date": "2023-05-15",
+      "sponsor": {
+        "bioguide_id": "A000001",
+        "name": "Representative Name",
+        "state": "NY",
+        "party": "D"
+      },
+      "cosponsors": [
+        {
+          "bioguide_id": "B000002",
+          "name": "Representative Name 2",
+          "state": "CA",
+          "party": "R"
+        }
+      ],
+      "committees": [
+        {
+          "committee_id": "HSJU",
+          "name": "House Judiciary",
+          "chamber": "House"
+        }
+      ],
+      "latest_action": {
+        "action_date": "2023-06-01",
+        "text": "Referred to the Subcommittee on..."
+      },
+      "update_date": "2023-06-02"
     }
   ],
   "count": 1,
-  "next_token": "pagination-token"
+  "next_token": null
 }
 ```
 
-Where `data_type` will be the plural form of the requested data type (e.g., `bills`, `committees`).
+### Committees
+
+Retrieve committees with optional filtering by congress, chamber, and date range.
+
+```
+GET /api/committees
+```
+
+**Query Parameters:**
+
+| Parameter   | Type    | Description                                        | Example      |
+|-------------|---------|----------------------------------------------------|--------------|
+| congress    | integer | Filter by congress number                           | 117          |
+| chamber     | string  | Filter by chamber (House, Senate)                  | House        |
+| start_date  | string  | Filter by update date (start date, YYYY-MM-DD)     | 2024-01-01   |
+| end_date    | string  | Filter by update date (end date, YYYY-MM-DD)       | 2024-01-31   |
+| limit       | integer | Maximum number of results to return (default: 20)  | 50           |
+
+**Response:**
+
+```json
+{
+  "committees": [
+    {
+      "committee_id": "HSJU",
+      "name": "House Committee on the Judiciary",
+      "chamber": "House",
+      "committee_type": "Standing",
+      "subcommittees": [
+        {
+          "committee_id": "HSJU10",
+          "name": "Subcommittee on Crime, Terrorism, and Homeland Security",
+          "parent_committee_id": "HSJU"
+        }
+      ],
+      "url": "https://judiciary.house.gov/",
+      "congress": 117,
+      "update_date": "2023-01-03"
+    }
+  ],
+  "count": 1,
+  "next_token": null
+}
+```
+
+### Hearings
+
+Retrieve hearings with optional filtering by congress, committee, and date range.
+
+```
+GET /api/hearings
+```
+
+**Query Parameters:**
+
+| Parameter   | Type    | Description                                        | Example      |
+|-------------|---------|----------------------------------------------------|--------------|
+| congress    | integer | Filter by congress number                           | 117          |
+| committee   | string  | Filter by committee system code                    | HSJU         |
+| chamber     | string  | Filter by chamber (House, Senate)                  | House        |
+| start_date  | string  | Filter by hearing date (start date, YYYY-MM-DD)    | 2024-01-01   |
+| end_date    | string  | Filter by hearing date (end date, YYYY-MM-DD)      | 2024-01-31   |
+| limit       | integer | Maximum number of results to return (default: 20)  | 50           |
+
+**Response:**
+
+```json
+{
+  "hearings": [
+    {
+      "hearing_id": "117-house-hsju-20230410",
+      "congress": 117,
+      "chamber": "House",
+      "committee": {
+        "committee_id": "HSJU",
+        "name": "House Committee on the Judiciary"
+      },
+      "subcommittee": {
+        "committee_id": "HSJU10",
+        "name": "Subcommittee on Crime, Terrorism, and Homeland Security"
+      },
+      "hearing_title": "Example Hearing Title",
+      "hearing_date": "2023-04-10",
+      "hearing_time": "10:00:00",
+      "location": "2141 Rayburn House Office Building",
+      "witnesses": [
+        {
+          "name": "Dr. John Smith",
+          "organization": "University Research Institute"
+        }
+      ],
+      "url": "https://judiciary.house.gov/calendar/eventsingle.aspx?EventID=12345",
+      "update_date": "2023-04-05"
+    }
+  ],
+  "count": 1,
+  "next_token": null
+}
+```
+
+### Amendments
+
+Retrieve amendments with optional filtering by congress, amendment type, and date range.
+
+```
+GET /api/amendments
+```
+
+**Query Parameters:**
+
+| Parameter      | Type    | Description                                        | Example      |
+|----------------|---------|----------------------------------------------------|--------------|
+| congress       | integer | Filter by congress number                           | 117          |
+| amendment_type | string  | Filter by amendment type                           | hamdt        |
+| start_date     | string  | Filter by update date (start date, YYYY-MM-DD)     | 2024-01-01   |
+| end_date       | string  | Filter by update date (end date, YYYY-MM-DD)       | 2024-01-31   |
+| limit          | integer | Maximum number of results to return (default: 20)  | 50           |
+
+**Response:**
+
+```json
+{
+  "amendments": [
+    {
+      "amendment_id": "117-hamdt123",
+      "congress": 117,
+      "amendment_type": "hamdt",
+      "amendment_number": "123",
+      "bill": {
+        "bill_id": "117-hr1234",
+        "bill_type": "hr",
+        "bill_number": "1234"
+      },
+      "sponsor": {
+        "bioguide_id": "A000001",
+        "name": "Representative Name",
+        "state": "NY",
+        "party": "D"
+      },
+      "title": "Amendment to increase funding for...",
+      "purpose": "To amend section 2 to include...",
+      "latest_action": {
+        "action_date": "2023-06-15",
+        "text": "Amendment agreed to in House by voice vote."
+      },
+      "update_date": "2023-06-16"
+    }
+  ],
+  "count": 1,
+  "next_token": null
+}
+```
+
+### Nominations
+
+Retrieve nominations with optional filtering by congress, organization, and date range.
+
+```
+GET /api/nominations
+```
+
+**Query Parameters:**
+
+| Parameter    | Type    | Description                                        | Example      |
+|--------------|---------|----------------------------------------------------|--------------|
+| congress     | integer | Filter by congress number                           | 117          |
+| organization | string  | Filter by organization                             | EPA          |
+| start_date   | string  | Filter by update date (start date, YYYY-MM-DD)     | 2024-01-01   |
+| end_date     | string  | Filter by update date (end date, YYYY-MM-DD)       | 2024-01-31   |
+| limit        | integer | Maximum number of results to return (default: 20)  | 50           |
+
+**Response:**
+
+```json
+{
+  "nominations": [
+    {
+      "nomination_id": "117-pn123",
+      "congress": 117,
+      "nomination_number": "123",
+      "nominee": "Jane Doe",
+      "position": "Administrator",
+      "organization": "Environmental Protection Agency",
+      "received_date": "2023-01-20",
+      "referred_to": "Committee on Environment and Public Works",
+      "actions": [
+        {
+          "date": "2023-01-20",
+          "text": "Received in the Senate and referred to the Committee on Environment and Public Works."
+        },
+        {
+          "date": "2023-03-15",
+          "text": "Committee on Environment and Public Works. Ordered to be reported favorably."
+        }
+      ],
+      "status": "Confirmed",
+      "update_date": "2023-03-20"
+    }
+  ],
+  "count": 1,
+  "next_token": null
+}
+```
+
+### Treaties
+
+Retrieve treaties with optional filtering by congress, country, and date range.
+
+```
+GET /api/treaties
+```
+
+**Query Parameters:**
+
+| Parameter   | Type    | Description                                        | Example      |
+|-------------|---------|----------------------------------------------------|--------------|
+| congress    | integer | Filter by congress number                           | 117          |
+| country     | string  | Filter by country                                  | Japan        |
+| start_date  | string  | Filter by update date (start date, YYYY-MM-DD)     | 2024-01-01   |
+| end_date    | string  | Filter by update date (end date, YYYY-MM-DD)       | 2024-01-31   |
+| limit       | integer | Maximum number of results to return (default: 20)  | 50           |
+
+**Response:**
+
+```json
+{
+  "treaties": [
+    {
+      "treaty_id": "117-treaty123",
+      "congress": 117,
+      "treaty_number": "123",
+      "title": "Treaty between the United States of America and Japan on...",
+      "country": "Japan",
+      "date_submitted": "2023-02-15",
+      "referred_to": "Committee on Foreign Relations",
+      "actions": [
+        {
+          "date": "2023-02-15",
+          "text": "Received in the Senate and referred to the Committee on Foreign Relations."
+        },
+        {
+          "date": "2023-04-20",
+          "text": "Committee on Foreign Relations. Ordered to be reported favorably."
+        }
+      ],
+      "status": "Resolution of Ratification Agreed to in Senate",
+      "update_date": "2023-05-01"
+    }
+  ],
+  "count": 1,
+  "next_token": null
+}
+```
+
+## Error Responses
+
+All endpoints return standardized error responses:
+
+### Bad Request (400)
+
+```json
+{
+  "error": {
+    "code": 400,
+    "message": "Invalid query parameters: 'congress' must be an integer between 93 and 118."
+  }
+}
+```
+
+### Not Found (404)
+
+```json
+{
+  "error": {
+    "code": 404,
+    "message": "Resource not found."
+  }
+}
+```
+
+### Server Error (500)
+
+```json
+{
+  "error": {
+    "code": 500,
+    "message": "An internal server error occurred. Please try again later."
+  }
+}
+```
 
 ## Pagination
 
-For endpoints that return multiple items, results are paginated. The response includes:
+All list endpoints support pagination through the `limit` parameter and the `next_token` response field.
 
-- `count`: Number of items in the current response
-- `next_token`: Token to retrieve the next page of results (if available)
-
-To get the next page, include the `next_token` in your next request:
+To get the next page of results, pass the `next_token` value from the previous response as a query parameter:
 
 ```
-GET /api/bills?next_token=eyJpZCI6Imxhc3QtZXZhbHVhdGVkLWtleSJ9
-```
-
-## Examples
-
-### Retrieve bills from the 117th Congress
-
-```
-GET /api/bills?congress=117
-```
-
-### Retrieve House committees with date filtering
-
-```
-GET /api/committees?chamber=House&start_date=2024-01-01&end_date=2024-01-31
-```
-
-### Retrieve hearings for a specific committee
-
-```
-GET /api/hearings?committee=HSJU&chamber=House
-```
-
-## Error Handling
-
-The API returns standard HTTP status codes:
-
-- `200 OK`: The request was successful
-- `400 Bad Request`: The request was invalid (e.g., invalid parameters)
-- `500 Internal Server Error`: An error occurred on the server
-
-Error responses include:
-
-```json
-{
-  "error": "Error message",
-  "status": 400
-}
-```
-
-## Best Practices
-
-1. **Use Filtering**: Always use filtering parameters to limit results
-2. **Handle Pagination**: Implement pagination handling for large result sets
-3. **Cache Responses**: Cache API responses to reduce load
-4. **Handle Errors**: Implement proper error handling for robust applications
-
-## Data Models
-
-### Bill
-```json
-{
-  "id": "bill-id",
-  "type": "bill",
-  "congress": 117,
-  "update_date": "2024-01-20",
-  "bill_type": "hr",
-  "bill_number": 123,
-  "title": "A bill to...",
-  "origin_chamber": "House",
-  "latest_action": {
-    "text": "Referred to Committee",
-    "action_date": "2024-01-19"
-  }
-}
-```
-
-### Committee
-```json
-{
-  "id": "committee-id",
-  "type": "committee",
-  "congress": 117,
-  "update_date": "2024-01-20",
-  "name": "Committee on the Judiciary",
-  "chamber": "House",
-  "committee_type": "standing",
-  "system_code": "HSJU",
-  "parent_committee": {
-    "name": "Parent Committee",
-    "system_code": "HSXX",
-    "url": "https://api.congress.gov/v3/committee/..."
-  },
-  "subcommittees": [
-    {
-      "name": "Subcommittee on Immigration",
-      "system_code": "HSJU10",
-      "url": "https://api.congress.gov/v3/committee/..."
-    }
-  ]
-}
-```
-
-### Hearing
-```json
-{
-  "id": "hearing-id",
-  "type": "hearing",
-  "congress": 117,
-  "update_date": "2024-01-20",
-  "chamber": "House",
-  "date": "2024-01-25",
-  "time": "10:00AM",
-  "location": "2141 RHOB",
-  "title": "Oversight Hearing on...",
-  "committee": {
-    "name": "Committee on the Judiciary",
-    "system_code": "HSJU",
-    "url": "https://api.congress.gov/v3/committee/..."
-  }
-}
-```
-
-### Amendment
-```json
-{
-  "id": "amendment-id",
-  "type": "amendment",
-  "congress": 117,
-  "update_date": "2024-01-20",
-  "amendment_number": 123,
-  "amendment_type": "house-amendment",
-  "title": "Amendment to H.R. 123",
-  "description": "Description of the amendment",
-  "purpose": "To provide for...",
-  "latest_action": {
-    "text": "Agreed to by voice vote",
-    "action_date": "2024-01-19"
-  }
-}
-```
-
-### Nomination
-```json
-{
-  "id": "nomination-id",
-  "type": "nomination",
-  "congress": 117,
-  "update_date": "2024-01-20",
-  "number": 123,
-  "received_date": "2024-01-10",
-  "description": "Nomination for position",
-  "organization": "Department of State",
-  "nomination_type": {
-    "is_civilian": true
-  },
-  "latest_action": {
-    "text": "Received in the Senate",
-    "action_date": "2024-01-10"
-  }
-}
-```
-
-### Treaty
-```json
-{
-  "id": "treaty-id",
-  "type": "treaty",
-  "congress": 117,
-  "update_date": "2024-01-20",
-  "treaty_number": "117-1",
-  "description": "Treaty between the United States and...",
-  "country": "Canada",
-  "subject": "Trade",
-  "received_date": "2024-01-05",
-  "latest_action": {
-    "text": "Treaty signed",
-    "action_date": "2024-01-05"
-  }
-}
+GET /api/bills?limit=20&next_token=eyJsYXN0X2tleV9zZWVuIjogeyJiaWxsX2lkIjogIjExNy1ocjEyMzQifX0=
 ```
 
 ## Rate Limiting
 
-The API currently does not implement rate limiting. In production environments, rate limits would be enforced to ensure fair usage.
+The API implements rate limiting to ensure fair usage. Clients should respect the following headers in responses:
 
-## Contact
+- `X-RateLimit-Limit`: Maximum number of requests per hour
+- `X-RateLimit-Remaining`: Number of requests remaining in the current window
+- `X-RateLimit-Reset`: Time in seconds until the rate limit resets
 
-For questions or support, please contact:
-- Email: support@example.com
+When rate limited, the API will respond with a 429 status code:
+
+```json
+{
+  "error": {
+    "code": 429,
+    "message": "Too many requests. Please try again after 30 seconds."
+  }
+}
+```
