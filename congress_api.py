@@ -235,7 +235,7 @@ class CongressBaseAPI:
                 'house-requirement', 'senate-communication',
                 'member', 'summaries', 'committee-print',
                 'committee-meeting', 'daily-congressional-record',
-                'bound-congressional-record'
+                'bound-congressional-record', 'congress'
             ]
             available_endpoints = {}
 
@@ -259,6 +259,9 @@ class CongressBaseAPI:
                             'year': datetime.now().year,
                             'month': datetime.now().month
                         })
+                    elif endpoint == 'congress':
+                        # For congress endpoint, no additional params needed
+                        pass
                     
                     response = self._make_request(endpoint, params)
 
@@ -355,6 +358,98 @@ class CongressAPI(CongressBaseAPI):
         super().__init__(config)
         self.validator = DataValidator()
 
+    def _process_congress(self, congress_data: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a congress record"""
+        try:
+            # Initial type validation
+            if not isinstance(congress_data, dict):
+                self.logger.error(f"Invalid congress data type: {type(congress_data)}, value: {congress_data}")
+                return None
+                
+            # Handle both direct and nested congress data structures
+            data = congress_data.get('congress', congress_data)
+            if isinstance(data, str):
+                self.logger.error(f"Received string instead of dictionary for congress: {data}")
+                return None
+            
+            # Validate data is a dict
+            if not isinstance(data, dict):
+                self.logger.error(f"Invalid congress data type: {type(data)}, value: {data}")
+                return None
+
+            # Extract key fields
+            congress_number = data.get('number', 0)
+            try:
+                congress_number = int(congress_number)
+            except (ValueError, TypeError):
+                self.logger.error(f"Invalid congress number: {congress_number}")
+                return None
+                
+            # Generate congress ID
+            congress_id = self._generate_congress_id(data)
+            if not congress_id:
+                self.logger.error("Failed to generate congress ID")
+                return None
+
+            # Create transformed congress data
+            transformed_congress = {
+                'id': congress_id,
+                'type': 'congress',
+                'congress': congress_number,
+                'update_date': data.get('updateDate', datetime.now().strftime('%Y-%m-%d')),
+                'version': 1,
+                'start_date': data.get('startDate', ''),
+                'end_date': data.get('endDate', ''),
+                'url': data.get('url', '')
+            }
+            
+            # Add additional fields if present
+            if 'senate' in data:
+                transformed_congress['senate'] = data.get('senate', {})
+            
+            if 'house' in data:
+                transformed_congress['house'] = data.get('house', {})
+            
+            # Validate the transformed data
+            is_valid, errors = self.validator.validate_congress(transformed_congress)
+            if not is_valid:
+                self.logger.error(f"Congress {congress_id} failed validation: {errors}")
+                self.logger.error(f"Invalid congress data: {json.dumps(transformed_congress, indent=2)}")
+                return None
+
+            # Clean up and return the data
+            return self.validator.cleanup_congress(transformed_congress)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to transform congress: {str(e)}")
+            self.logger.error(f"Raw congress data: {json.dumps(congress_data, indent=2)}")
+            return None
+            
+    def _generate_congress_id(self, congress: Dict) -> Optional[str]:
+        """Generate a congress ID from congress data"""
+        try:
+            # Extract congress number
+            congress_number = congress.get('number', '')
+            if not congress_number:
+                self.logger.warning("Missing required field 'number' for congress ID generation")
+                return None
+                
+            # Create a stable, unique ID for this congress
+            try:
+                number = int(congress_number)
+                congress_id = f"congress-{number}"
+            except (ValueError, TypeError):
+                # If we can't parse the number, use it as a string
+                congress_id = f"congress-{congress_number}"
+                
+            self.logger.debug(f"Generated congress ID: {congress_id}")
+            return congress_id
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate congress ID: {str(e)}")
+            self.logger.error(f"Raw congress data: {json.dumps(congress, indent=2)}")
+            return None
+
     def get_data_for_date(self, date: datetime) -> List[Dict]:
         """Get all data types for a specific date"""
         try:
@@ -401,6 +496,13 @@ class CongressAPI(CongressBaseAPI):
             # Add congress parameter for specific endpoints
             if endpoint_name in ['committee', 'committee-meeting']:
                 params['congress'] = current_congress
+            
+            # For congress endpoint, different parameter structure
+            if endpoint_name == 'congress':
+                params = {
+                    'format': 'json',
+                    'limit': 20
+                }
 
             all_items = []
             offset = 0
@@ -429,7 +531,8 @@ class CongressAPI(CongressBaseAPI):
                     'committee-print': 'committeePrints',
                     'committee-meeting': 'committeeMeetings',
                     'daily-congressional-record': 'dailyCongressionalRecords',
-                    'bound-congressional-record': 'boundCongressionalRecord'  # Fixed key name
+                    'bound-congressional-record': 'boundCongressionalRecord',
+                    'congress': 'congresses'  # Added response key for congress endpoint
                 }
                 
                 # Get the correct key for this endpoint
@@ -470,6 +573,8 @@ class CongressAPI(CongressBaseAPI):
                             processed_item = self._process_treaty(item, current_congress)
                         elif endpoint_name == 'bound-congressional-record':
                             processed_item = self._process_bound_congressional_record(item, current_congress)
+                        elif endpoint_name == 'congress':
+                            processed_item = self._process_congress(item, current_congress)
                         # Add other endpoint processors as needed
                         
                         if processed_item:
@@ -501,7 +606,8 @@ class CongressAPI(CongressBaseAPI):
             
         except Exception as e:
             self.logger.error(f"Failed to get {endpoint_name} data: {str(e)}")
-            self.logger.error(f"Parameters used: {json.dumps(params, indent=2)}")
+            if 'params' in locals():
+                self.logger.error(f"Parameters used: {json.dumps(params, indent=2)}")
             return []
 
     def _process_committee(self, committee: Dict, current_congress: int) -> Optional[Dict]:
