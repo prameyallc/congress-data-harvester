@@ -10,6 +10,7 @@ import time
 from botocore.exceptions import ClientError
 import logging
 from decimal import Decimal
+from dynamo_handler import DynamoHandler
 
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -160,11 +161,127 @@ def test_dynamo_permissions():
         logger.error(f"Permission test failed: {str(e)}")
         return False
 
+def test_deduplication_mechanism():
+    """Test the deduplication mechanism in DynamoHandler"""
+    try:
+        logger.info("Starting deduplication mechanism tests...")
+        # Initialize DynamoDB handler
+        dynamodb_config = {
+            'table_name': 'prameya-development-dynamodb-table',
+            'region': 'us-west-2'
+        }
+
+        handler = DynamoHandler(dynamodb_config)
+
+        # Test reset_processed_ids
+        logger.info("Testing reset_processed_ids method...")
+        handler.processed_item_ids.add("test_id_1")
+        handler.processed_item_ids.add("test_id_2")
+
+        # Verify items are in the set
+        assert "test_id_1" in handler.processed_item_ids
+        assert "test_id_2" in handler.processed_item_ids
+        logger.info("Successfully added test IDs to processed_item_ids set")
+
+        # Reset the set
+        handler.reset_processed_ids()
+
+        # Verify the set is empty
+        assert len(handler.processed_item_ids) == 0
+        logger.info("Successfully reset processed_item_ids set")
+
+        # Create test timestamp
+        timestamp = int(time.time())
+
+        # Create test items with duplicate IDs
+        test_items = []
+        for i in range(5):
+            # Add original items
+            test_items.append({
+                'id': f'test_dedup_{i}_{timestamp}',
+                'type': 'test',
+                'data': f'Original item {i}',
+                'update_date': '2024-02-22'
+            })
+
+            # Add duplicate items with same ID but different data
+            if i % 2 == 0:  # Add duplicates for even-numbered items
+                test_items.append({
+                    'id': f'test_dedup_{i}_{timestamp}',
+                    'type': 'test',
+                    'data': f'Duplicate item {i}',
+                    'update_date': '2024-02-22'
+                })
+
+        logger.info(f"Created {len(test_items)} test items with duplicates")
+
+        # Test batch_store_items with deduplication
+        successful_items, failed_items = handler.batch_store_items(test_items)
+
+        # Should have stored 5 unique items and skipped the duplicates
+        logger.info(f"Stored {successful_items} items, expected 5")
+        logger.info(f"Failed items: {len(failed_items)}, expected 0")
+
+        # Verify that all original item IDs are in the processed set
+        for i in range(5):
+            item_id = f'test_dedup_{i}_{timestamp}'
+            assert item_id in handler.processed_item_ids
+            logger.info(f"Verified item {item_id} is in processed set")
+
+        # Now try to store the same items again - all should be duplicates
+        successful_items_2, failed_items_2 = handler.batch_store_items(test_items)
+
+        # Should have skipped all items as duplicates
+        logger.info(f"Second batch: stored {successful_items_2} items, expected 0")
+        logger.info(f"Second batch failed items: {len(failed_items_2)}, expected 0")
+
+        # Test reset_processed_ids again
+        handler.reset_processed_ids()
+
+        # Now try again after reset - should write items again
+        successful_items_3, failed_items_3 = handler.batch_store_items(test_items[:5])  # Using only unique items
+
+        # Should have stored 5 unique items again
+        logger.info(f"After reset: stored {successful_items_3} items, expected 5")
+        logger.info(f"After reset failed items: {len(failed_items_3)}, expected 0")
+
+        # Cleanup test items
+        logger.info("Cleaning up test items...")
+        for i in range(5):
+            try:
+                handler.table.delete_item(
+                    Key={'id': f'test_dedup_{i}_{timestamp}'}
+                )
+                logger.info(f"Deleted test item test_dedup_{i}_{timestamp}")
+            except Exception as e:
+                logger.warning(f"Failed to delete test item: {str(e)}")
+
+        logger.info("Deduplication mechanism tests completed successfully")
+        return True
+
+    except Exception as e:
+        logger.error(f"Deduplication test failed: {str(e)}")
+        return False
+
 if __name__ == "__main__":
     logger.info("Starting DynamoDB permission tests...")
-    if test_dynamo_permissions():
-        logger.info("All DynamoDB permission tests completed successfully")
+    tests_passed = True
+
+    if not test_aws_credentials():
+        logger.error("AWS credentials test failed")
+        tests_passed = False
+
+    if not test_dynamo_permissions():
+        logger.error("DynamoDB permission tests failed")
+        tests_passed = False
+
+    if not test_deduplication_mechanism():
+        logger.error("Deduplication mechanism tests failed")
+        tests_passed = False
+
+    if tests_passed:
+        logger.info("All tests completed successfully")
         sys.exit(0)
     else:
-        logger.error("DynamoDB permission tests failed")
+        logger.error("Some tests failed")
         sys.exit(1)

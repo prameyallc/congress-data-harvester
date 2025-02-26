@@ -8,7 +8,11 @@ A robust Python microservice for downloading and storing Congress.gov data in Dy
 - **Automated Data Retrieval**: Seamless integration with Congress.gov API
 - **Historical Coverage**: Access data back to March 4, 1789 (First Congress)
 - **Configurable Date Ranges**: Flexible data collection periods
-- **Intelligent Rate Limiting**: Automatic request throttling and backoff
+- **Intelligent Rate Limiting**: 
+  - Automatic request throttling and backoff
+  - Endpoint-specific rate limits
+  - Dynamic adjustment based on API response
+  - Exponential backoff with jitter
 - **Parallel Processing**: 
   - Multi-threaded data collection
   - Configurable worker pool size
@@ -21,6 +25,11 @@ A robust Python microservice for downloading and storing Congress.gov data in Dy
   - Transaction integrity protection
   - State recovery mechanisms
   - Improved error logging and reporting for better troubleshooting
+- **Data Deduplication**:
+  - Automatic detection and skipping of duplicate items
+  - Memory-efficient tracking of processed IDs
+  - Prevents DynamoDB duplicate key errors
+  - Detailed duplicate metrics and reporting
 
 ### Storage & Performance
 - **DynamoDB Integration**: 
@@ -30,6 +39,7 @@ A robust Python microservice for downloading and storing Congress.gov data in Dy
   - Optimized batch operations
   - Secondary indices for efficient querying
   - Conditional writes to prevent duplicates
+  - Item deduplication to prevent errors
 
 ### Operation Modes
 1. **Incremental Download**
@@ -62,11 +72,13 @@ A robust Python microservice for downloading and storing Congress.gov data in Dy
   - Configurable log levels
   - Transaction logging
   - Performance metrics
+  - Endpoint-specific success/failure rates
 - **Health Checks**:
   - API connectivity verification
   - DynamoDB access testing
   - Environment validation
   - Component status monitoring
+  - Detailed endpoint health reporting
 - **Resource Monitoring**:
   - Memory usage tracking
   - CPU utilization monitoring
@@ -77,7 +89,13 @@ A robust Python microservice for downloading and storing Congress.gov data in Dy
   - Detailed error reporting
   - Automatic retry mechanisms
   - Data consistency verification
-
+  - Enhanced timeout handling
+- **Advanced Metrics**:
+  - Per-endpoint statistics
+  - Success/failure rates
+  - Duplicate detection counts
+  - Ingestion reporting
+  - API latency tracking
 
 ## Quick Start
 
@@ -112,7 +130,7 @@ The application uses a JSON configuration file (`config.json`) for customization
         "base_url": "https://api.congress.gov/v3",
         "rate_limit": {
             "requests_per_second": 5,
-            "max_retries": 3,
+            "max_retries": 5,
             "retry_delay": 1
         }
     },
@@ -150,7 +168,7 @@ The application uses a JSON configuration file (`config.json`) for customization
 
 1. **API Settings**
    - `requests_per_second`: Control rate limiting (default: 5)
-   - `max_retries`: Maximum retry attempts for failed requests
+   - `max_retries`: Maximum retry attempts for failed requests (default: 5)
    - `retry_delay`: Base delay between retries in seconds
 
 2. **DynamoDB Configuration**
@@ -173,6 +191,47 @@ The application uses a JSON configuration file (`config.json`) for customization
    - `backup_count`: Number of backup log files to keep
    - `include_performance_metrics`: Enable detailed performance logging
 
+## Advanced Usage
+
+### Command Line Options
+
+```bash
+# Enable verbose logging
+python congress_downloader.py --mode refresh --start-date 2024-01-01 --end-date 2024-01-31 --verbose
+
+# Specify parallel workers (overrides config file)
+python congress_downloader.py --mode bulk --parallel-workers 5
+
+# Quick incremental update with custom lookback period
+python congress_downloader.py --mode incremental --lookback-days 3
+```
+
+### Deduplication System
+
+The application includes automatic deduplication of items to prevent errors when writing to DynamoDB:
+
+- Tracks processed item IDs in memory
+- Automatically skips duplicate items before batch operations
+- Resets tracking between processing sessions to maintain memory efficiency
+- Reports detailed metrics on duplicates detected and skipped
+
+### Metrics and Reporting
+
+The application provides comprehensive metrics for monitoring and analysis:
+
+- **API Metrics Report**: Details on API requests, success rates, and latency
+- **Ingestion Report**: Information on items processed, stored, and duplicates skipped
+- **Health Check**: Comprehensive verification of API endpoints and system components
+
+View detailed metrics with:
+
+```bash
+# Run with verbose mode to see detailed metrics in logs
+python congress_downloader.py --mode incremental --lookback-days 1 --verbose
+
+# Run dedicated health check
+python health_check.py
+```
 
 ## Documentation
 
