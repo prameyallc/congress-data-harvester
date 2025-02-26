@@ -3,7 +3,7 @@ import time
 from datetime import datetime, timedelta
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from urllib3.util import Retry
 from typing import Dict, List, Any, Optional, Union, Callable
 import logging
 from random import uniform
@@ -330,33 +330,81 @@ class CongressBaseAPI:
 
 
 class CongressAPI(CongressBaseAPI):
-    """Extended API client for specific data types
-    
-    Important: This class has been cleaned up to remove duplicate method declarations.
-    Only the most complete implementation of each method is kept at the top of the class.
-    The following methods have been deduplicated:
-    
-    - _process_bill() and _generate_bill_id()
-    - _process_amendment() and _generate_amendment_id()
-    - _process_nomination() and _generate_nomination_id()
-    - _process_treaty() and _generate_treaty_id()
-    - _process_committee_report() and _generate_committee_report_id()
-    - _process_congressional_record() and _generate_congressional_record_id()
-    - _process_house_communication() and _generate_house_comm_id()
-    - _process_senate_communication() and _generate_senate_comm_id()
-    - _process_committee_meeting() and _generate_meeting_id()
-    - _process_member() and _generate_member_id()
-    - _process_summaries() and _generate_summary_id()
-    - _process_bound_congressional_record() and _generate_bound_record_id()
-    - _process_daily_congressional_record() and _generate_daily_record_id()
-    - _process_hearing() and _generate_hearing_id()
-    - _process_house_requirement() and _generate_house_req_id()
-    - _process_committee_print() and _generate_print_id()
-    """
+    """Extended API client for specific data types"""
 
-    def __init__(self, config):
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """Initialize the Congress API client"""
         super().__init__(config)
         self.validator = DataValidator()
+
+    def _process_item(self, endpoint_name: str, item: Dict, current_congress: int) -> Optional[Dict]:
+        """Centralized processor for all endpoints that delegates to endpoint-specific processors"""
+        try:
+            processor_map = {
+                'bill': self._process_bill,
+                'amendment': self._process_amendment,
+                'nomination': self._process_nomination, 
+                'treaty': self._process_treaty,
+                'committee': self._process_committee,
+                'hearing': self._process_hearing,
+                'committee-report': self._process_committee_report,
+                'congressional-record': self._process_congressional_record,
+                'house-communication': self._process_house_communication,
+                'senate-communication': self._process_senate_communication,
+                'member': self._process_member,
+                'summaries': self._process_summary,
+                'committee-print': self._process_committee_print,
+                'committee-meeting': self._process_committee_meeting,
+                'daily-congressional-record': self._process_daily_congressional_record,
+                'bound-congressional-record': self._process_bound_congressional_record,
+                'congress': self._process_congress
+            }
+
+            if endpoint_name not in processor_map:
+                self.logger.warning(f"Unknown endpoint type: {endpoint_name}")
+                return None
+
+            processor = processor_map[endpoint_name]
+            return processor(item, current_congress)
+
+        except Exception as e:
+            self.logger.error(f"Failed to process {endpoint_name} item: {str(e)}")
+            self.logger.error(f"Raw item data: {json.dumps(item, indent=2)}")
+            return None
+
+    def _generate_id(self, endpoint_name: str, item: Dict, current_congress: int) -> Optional[str]:
+        """Centralized ID generation for all endpoints"""
+        try:
+            generator_map = {
+                'bill': self._generate_bill_id,
+                'amendment': self._generate_amendment_id,
+                'nomination': self._generate_nomination_id,
+                'treaty': self._generate_treaty_id,
+                'committee': self._generate_committee_id,
+                'hearing': self._generate_hearing_id,
+                'committee-report': self._generate_committee_report_id,
+                'congressional-record': self._generate_congressional_record_id,
+                'house-communication': self._generate_house_comm_id,
+                'senate-communication': self._generate_senate_comm_id,
+                'member': self._generate_member_id,
+                'summaries': self._generate_summary_id,
+                'committee-print': self._generate_committee_print_id,
+                'committee-meeting': self._generate_meeting_id,
+                'daily-congressional-record': self._generate_daily_record_id,
+                'bound-congressional-record': self._generate_bound_record_id,
+                'congress': self._generate_congress_id
+            }
+
+            if endpoint_name not in generator_map:
+                self.logger.warning(f"No ID generator found for endpoint: {endpoint_name}")
+                return None
+
+            generator = generator_map[endpoint_name]
+            return generator(item, current_congress)
+
+        except Exception as e:
+            self.logger.error(f"Failed to generate ID for {endpoint_name}: {str(e)}")
+            return None
 
     def _process_summary(self, summary: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a bill summary"""
@@ -566,17 +614,22 @@ class CongressAPI(CongressBaseAPI):
             # Process each available endpoint
             for endpoint_name, endpoint_info in endpoints.items():
                 try:
+                    self.logger.info(f"Processing endpoint: {endpoint_name} for date {date_str}")
                     data = self._get_endpoint_data(
                         endpoint_name,
                         date_str,
                         current_congress
                     )
                     if data:
+                        self.logger.info(f"Successfully processed {len(data)} items from {endpoint_name}")
                         all_data.extend(data)
+                    else:
+                        self.logger.warning(f"No data returned from {endpoint_name}")
                 except Exception as e:
-                    self.logger.error(f"Failed to get {endpoint_name} data: {str(e)}")
+                    self.logger.error(f"Failed to process {endpoint_name} data: {str(e)}")
                     continue
 
+            self.logger.info(f"Total items processed across all endpoints: {len(all_data)}")
             return all_data
 
         except Exception as e:
@@ -586,158 +639,304 @@ class CongressAPI(CongressBaseAPI):
     def _get_endpoint_data(self, endpoint_name: str, date_str: str, current_congress: int) -> List[Dict]:
         """Get data for a specific endpoint and date"""
         try:
-            self.logger.info(f"Fetching {endpoint_name} for date {date_str} (offset: 0)")
+            self.logger.info(f"Fetching {endpoint_name} data for date {date_str}")
             
-            # Define endpoint-specific parameters
+            # Parse input date
+            dt = datetime.strptime(date_str, '%Y-%m-%d')
+            
+            # Define base parameters
             params = {
                 'format': 'json',
-                'fromDateTime': f"{date_str}T00:00:00Z",
-                'toDateTime': f"{date_str}T23:59:59Z",
-                'limit': 20
+                'limit': 20,
+                'offset': 0
             }
             
-            # Add endpoint-specific parameters
-            if endpoint_name in ['committee', 'committee-meeting', 'committee-print']:
-                params['congress'] = current_congress
-                params['chamber'] = 'house,senate'  # Request data from both chambers
-            elif endpoint_name in ['daily-congressional-record', 'bound-congressional-record']:
-                # Parse date for year/month parameters
-                dt = datetime.strptime(date_str, '%Y-%m-%d')
+            # Handle endpoint-specific parameters
+            try:
+                if endpoint_name in ['committee', 'committee-meeting', 'committee-print']:
+                    params.update({
+                        'congress': current_congress,
+                        'chamber': 'house,senate',
+                        'fromDateTime': f"{date_str}T00:00:00Z",
+                        'toDateTime': f"{date_str}T23:59:59Z"
+                    })
+                    self.logger.debug(f"Using committee parameters: congress={current_congress}")
+                elif endpoint_name in ['daily-congressional-record', 'bound-congressional-record']:
+                    params.update({
+                        'year': dt.year,
+                        'month': dt.month,
+                        'day': dt.day
+                    })
+                    self.logger.debug(
+                        f"Using date parameters for {endpoint_name}: "
+                        f"year={dt.year}, month={dt.month}, day={dt.day}"
+                    )
+                elif endpoint_name == 'congress':
+                    self.logger.debug("Congress endpoint: using base parameters")
+                else:
+                    params.update({
+                        'fromDateTime': f"{date_str}T00:00:00Z",
+                        'toDateTime': f"{date_str}T23:59:59Z"
+                    })
+                    if endpoint_name in ['member']:
+                        params['congress'] = current_congress
+                    self.logger.debug(f"Using default date range parameters for {endpoint_name}")
+
+            except Exception as e:
+                self.logger.error(f"Error setting parameters for {endpoint_name}: {str(e)}")
+                self.logger.error("Falling back to default parameters")
                 params.update({
-                    'year': dt.year,
-                    'month': dt.month
+                    'fromDateTime': f"{date_str}T00:00:00Z",
+                    'toDateTime': f"{date_str}T23:59:59Z"
                 })
-                # Remove datetime parameters for these endpoints
-                params.pop('fromDateTime', None)
-                params.pop('toDateTime', None)
-            elif endpoint_name == 'congress':
-                # Congress endpoint doesn't use datetime parameters
-                params.pop('fromDateTime', None)
-                params.pop('toDateTime', None)
+
+            # Define response key mappings
+            endpoint_key_map = {
+                'bill': 'bills',
+                'amendment': 'amendments',
+                'nomination': 'nominations',
+                'treaty': 'treaties',
+                'committee': 'committees',
+                'hearing': 'hearings',
+                'committee-report': 'committeeReports',
+                'congressional-record': 'congressionalRecords',
+                'house-communication': 'houseCommunications',
+                'senate-communication': 'senateCommunications',
+                'member': 'members',
+                'summaries': 'summaries',
+                'committee-print': 'committeePrints',
+                'committee-meeting': 'committeeMeetings',
+                'daily-congressional-record': 'dailyCongressionalRecords',
+                'bound-congressional-record': 'boundCongressionalRecords',
+                'congress': 'congresses'
+            }
 
             all_items = []
             total_items = 0
-            processed_items = 0
             offset = 0
+            
+            # Initialize tracking variables
+            processed_items = 0
+            processed_count = 0
             
             while True:
                 params['offset'] = offset
-                self.logger.debug(f"Making request to {endpoint_name} with params: {json.dumps(params, indent=2)}")
+                self.logger.debug(
+                    f"Making request to {endpoint_name} with params: "
+                    f"{json.dumps({k: v for k, v in params.items() if k != 'api_key'}, indent=2)}"
+                )
                 
                 response = self._make_request(endpoint_name, params)
-                self.logger.debug(f"Response contains keys: {list(response.keys())}")
-                
-                # Map endpoint names to their response keys
-                endpoint_key_map = {
-                    'bill': 'bills',
-                    'amendment': 'amendments',
-                    'nomination': 'nominations',
-                    'treaty': 'treaties',
-                    'committee': 'committees',
-                    'hearing': 'hearings',
-                    'committee-report': 'committeeReports',
-                    'congressional-record': 'congressionalRecords',
-                    'house-communication': 'houseCommunications',
-                    'senate-communication': 'senateCommunications',
-                    'member': 'members',
-                    'summaries': 'summaries',
-                    'committee-print': 'committeePrints',
-                    'committee-meeting': 'committeeMeetings',
-                    'daily-congressional-record': 'dailyCongressionalRecords',
-                    'bound-congressional-record': 'boundCongressionalRecord',
-                    'congress': 'congresses'
-                }
+                self.logger.debug(f"Response keys for {endpoint_name}: {list(response.keys())}")
                 
                 data_key = endpoint_key_map.get(endpoint_name)
                 if not data_key:
-                    self.logger.warning(f"No response key mapping found for endpoint {endpoint_name}")
-                    return []
-                
+                    self.logger.warning(f"No response key mapping for {endpoint_name}")
+                    break
+
                 items = response.get(data_key, [])
                 if not items:
-                    self.logger.warning(f"No items found in response for {endpoint_name}")
                     if response.get('pagination', {}).get('count', 0) > 0:
-                        self.logger.warning("Pagination indicates data exists but none was returned")
+                        self.logger.warning(
+                            f"Pagination indicates data exists but none returned for {endpoint_name}"
+                        )
+                    else:
+                        self.logger.info(f"No items found for {endpoint_name} at offset {offset}")
                     break
-                    
-                total_items += len(items)
-                self.logger.info(f"Found {len(items)} items in '{data_key}' key")
-                
+
+                batch_items = []
                 for item in items:
-                    try:
-                        processed_item = None
-                        
-                        # Process based on endpoint type
-                        if endpoint_name == 'bill':
-                            processed_item = self._process_bill(item, current_congress)
-                        elif endpoint_name == 'amendment':
-                            processed_item = self._process_amendment(item, current_congress)
-                        elif endpoint_name == 'nomination':
-                            processed_item = self._process_nomination(item, current_congress)
-                        elif endpoint_name == 'treaty':
-                            processed_item = self._process_treaty(item, current_congress)
-                        elif endpoint_name == 'committee':
-                            processed_item = self._process_committee(item, current_congress)
-                        elif endpoint_name == 'hearing':
-                            processed_item = self._process_hearing(item, current_congress)
-                        elif endpoint_name == 'committee-report':
-                            processed_item = self._process_committee_report(item, current_congress)
-                        elif endpoint_name == 'congressional-record':
-                            processed_item = self._process_congressional_record(item, current_congress)
-                        elif endpoint_name == 'house-communication':
-                            processed_item = self._process_house_communication(item, current_congress)
-                        elif endpoint_name == 'senate-communication':
-                            processed_item = self._process_senate_communication(item, current_congress)
-                        elif endpoint_name == 'member':
-                            processed_item = self._process_member(item, current_congress)
-                        elif endpoint_name == 'summaries':
-                            processed_item = self._process_summary(item, current_congress)
-                        elif endpoint_name == 'committee-print':
-                            processed_item = self._process_committee_print(item, current_congress)
-                        elif endpoint_name == 'committee-meeting':
-                            processed_item = self._process_committee_meeting(item, current_congress)
-                        elif endpoint_name == 'daily-congressional-record':
-                            processed_item = self._process_daily_congressional_record(item, current_congress)
-                        elif endpoint_name == 'bound-congressional-record':
-                            processed_item = self._process_bound_congressional_record(item, current_congress)
-                        elif endpoint_name == 'congress':
-                            processed_item = self._process_congress(item, current_congress)
-                        
-                        if processed_item:
-                            all_items.append(processed_item)
-                            processed_items += 1
-                        else:
-                            self.logger.warning(f"Failed to process {endpoint_name} item: {json.dumps(item, indent=2)}")
-                            
-                    except Exception as e:
-                        self.logger.error(f"Error processing {endpoint_name} item: {str(e)}")
-                        self.logger.error(f"Problematic item: {json.dumps(item, indent=2)}")
-                        continue
-                
-                # Log success rate for this batch
-                success_rate = (processed_items / total_items * 100) if total_items > 0 else 0
-                self.logger.info(f"Successfully processed {processed_items} out of {total_items} {endpoint_name} items ({success_rate:.1f}%)")
-                
-                # Check for pagination
+                    processed_item = self._process_item(endpoint_name, item, current_congress)
+                    if processed_item:
+                        batch_items.append(processed_item)
+                        processed_count += 1
+                    else:
+                        self.logger.warning(
+                            f"Failed to process {endpoint_name} item: {json.dumps(item, indent=2)}"
+                        )
+
+                if batch_items:
+                    all_items.extend(batch_items)
+                    total_items += len(batch_items)
+                    processed_items += len(batch_items)
+                    self.logger.info(
+                        f"Processed {len(batch_items)} items from {endpoint_name} "
+                        f"(total processed: {processed_items}, success rate: "
+                        f"{(processed_count/total_items*100):.1f}%)"
+                    )
+
+                # Check if we need to fetch more pages
                 pagination = response.get('pagination', {})
-                if not pagination.get('next'):
-                    self.logger.debug(f"No more pages for {endpoint_name}")
+                if not pagination or offset + len(items) >= pagination.get('count', 0):
                     break
-                    
+
                 offset += len(items)
-                
-                # Safety check to prevent infinite loops
-                if offset > 10000:  # Arbitrary limit
+                if offset > 10000:  # Safety limit
                     self.logger.warning(f"Reached maximum offset for {endpoint_name}")
                     break
-            
+
+            # Final summary
+            if total_items > 0:
+                success_rate = (processed_items / total_items) * 100
+                self.logger.info(
+                    f"Completed processing {endpoint_name}: {processed_items} successful out of "
+                    f"{total_items} total items ({success_rate:.1f}% success rate)"
+                )
+            else:
+                self.logger.info(f"No items found for {endpoint_name}")
+
             return all_items
-            
+
         except Exception as e:
             self.logger.error(f"Failed to get {endpoint_name} data: {str(e)}")
             if 'params' in locals():
                 self.logger.error(f"Parameters used: {json.dumps(params, indent=2)}")
             return []
+
+    def _process_committee_print(self, print_data: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a committee print"""
+        try:
+            if not isinstance(print_data, dict):
+                self.logger.error(f"Invalid committee print data type: {type(print_data)}")
+                return None
+                
+            # Generate committee print ID first
+            print_id = self._generate_committee_print_id(print_data, current_congress)
+            if not print_id:
+                self.logger.warning("Unable to generate ID for committee print")
+                return None
+
+            # Create transformed print data
+            transformed_print = {
+                'id': print_id,
+                'type': 'committee-print',
+                'congress': current_congress,
+                'update_date': print_data.get('updateDate', ''),
+                'version': 1,
+                'chamber': print_data.get('chamber', ''),  
+                'committee': print_data.get('committee', ''),
+                'subcommittee': print_data.get('subcommittee', ''),
+                'title': print_data.get('title', ''),
+                'publication_date': print_data.get('publicationDate', ''),
+                'description': print_data.get('description', ''),
+                'url': print_data.get('url', '')
+            }
+
+            # Validate the transformed data
+            is_valid, errors = self.validator.validate_committee_print(transformed_print)
+            if not is_valid:
+                self.logger.error(f"Committee print {print_id} failed validation: {errors}")
+                return None
+
+            cleaned_print = self.validator.cleanup_committee_print(transformed_print)
+            self.logger.debug(f"Successfully processed committee print: {print_id}")
+            return cleaned_print
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform committee print: {str(e)}")
+            self.logger.error(f"Raw committee print data: {json.dumps(print_data, indent=2)}")
+            return None
+
+    def _generate_committee_print_id(self, print_data: Dict, current_congress: int) -> Optional[str]:
+        """Generate a committee print ID"""
+        try:
+            chamber = print_data.get('chamber', '').lower()
+            committee = print_data.get('committee', '')
+            publication_date = print_data.get('publicationDate', '')
+
+            if not all([chamber, committee, publication_date]):
+                self.logger.warning(
+                    f"Missing required fields for committee print ID generation: "
+                    f"chamber={chamber}, committee={committee}, date={publication_date}"
+                )
+                return None
+
+            # Create a stable ID incorporating committee and date
+            date_str = publication_date.replace('-', '')
+            committee_slug = re.sub(r'[^a-z0-9]+', '-', committee.lower()).strip('-')
+            print_id = f"print_{current_congress}_{chamber}_{committee_slug}_{date_str}"
+            
+            self.logger.debug(f"Generated committee print ID: {print_id}")
+            return print_id
+
+        except Exception as e:
+            self.logger.error(f"Failed to generate committee print ID: {str(e)}")
+            return None
+
+    def _process_committee_meeting(self, meeting: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a committee meeting"""
+        try:
+            if not isinstance(meeting, dict):
+                self.logger.error(f"Invalid committee meeting data type: {type(meeting)}")
+                return None
+                
+            # Generate meeting ID first
+            meeting_id = self._generate_meeting_id(meeting, current_congress)
+            if not meeting_id:
+                self.logger.warning("Unable to generate ID for committee meeting")
+                return None
+
+            # Create transformed meeting data
+            transformed_meeting = {
+                'id': meeting_id,
+                'type': 'committee-meeting',
+                'congress': current_congress,
+                'update_date': meeting.get('updateDate', ''),
+                'version': 1,
+                'chamber': meeting.get('chamber', ''),
+                'committee': meeting.get('committee', ''),
+                'subcommittee': meeting.get('subcommittee', ''),
+                'title': meeting.get('title', ''),
+                'meeting_date': meeting.get('meetingDate', ''),
+                'time': meeting.get('time', ''),
+                'location': meeting.get('location', ''),
+                'meeting_type': meeting.get('meetingType', ''),
+                'status': meeting.get('status', ''),
+                'url': meeting.get('url', '')
+            }
+
+            # Validate the transformed data
+            is_valid, errors = self.validator.validate_committee_meeting(transformed_meeting)
+            if not is_valid:
+                self.logger.error(f"Committee meeting {meeting_id} failed validation: {errors}")
+                return None
+
+            cleaned_meeting = self.validator.cleanup_committee_meeting(transformed_meeting)
+            self.logger.debug(f"Successfully processed committee meeting: {meeting_id}")
+            return cleaned_meeting
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform committee meeting: {str(e)}")
+            self.logger.error(f"Raw committee meeting data: {json.dumps(meeting, indent=2)}")
+            return None
+
+    def _generate_meeting_id(self, meeting: Dict, current_congress: int) -> Optional[str]:
+        """Generate a committee meeting ID"""
+        try:
+            chamber = meeting.get('chamber', '').lower()
+            committee = meeting.get('committee', '')
+            meeting_date = meeting.get('meetingDate', '')
+            meeting_time = meeting.get('time', '')
+
+            if not all([chamber, committee, meeting_date]):
+                self.logger.warning(
+                    f"Missing required fields for meeting ID generation: "
+                    f"chamber={chamber}, committee={committee}, date={meeting_date}"
+                )
+                return None
+
+            # Create a stable ID incorporating committee, date and time
+            date_str = meeting_date.replace('-', '')
+            time_str = re.sub(r'[^0-9]', '', meeting_time) if meeting_time else '0000'
+            committee_slug = re.sub(r'[^a-z0-9]+', '-', committee.lower()).strip('-')
+            meeting_id = f"meeting_{current_congress}_{chamber}_{committee_slug}_{date_str}_{time_str}"
+            
+            self.logger.debug(f"Generated committee meeting ID: {meeting_id}")
+            return meeting_id
+
+        except Exception as e:
+            self.logger.error(f"Failed to generate meeting ID: {str(e)}")
+            return None
 
     def _process_committee(self, committee: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a committee"""
