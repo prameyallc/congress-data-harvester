@@ -93,7 +93,26 @@ spec.components.schema("Committee", {
         "name": {"type": "string", "description": "Committee name"},
         "chamber": {"type": "string", "description": "Chamber (House/Senate)"},
         "committee_type": {"type": "string", "description": "Committee type (standing, etc.)"},
-        "system_code": {"type": "string", "description": "Committee system code"}
+        "system_code": {"type": "string", "description": "Committee system code"},
+        "parent_committee": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Parent committee name"},
+                "system_code": {"type": "string", "description": "Parent committee system code"},
+                "url": {"type": "string", "description": "URL to parent committee data"}
+            }
+        },
+        "subcommittees": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Subcommittee name"},
+                    "system_code": {"type": "string", "description": "Subcommittee system code"},
+                    "url": {"type": "string", "description": "URL to subcommittee data"}
+                }
+            }
+        }
     }
 })
 
@@ -109,7 +128,85 @@ spec.components.schema("Hearing", {
         "time": {"type": "string", "description": "Hearing time"},
         "location": {"type": "string", "description": "Hearing location"},
         "title": {"type": "string", "description": "Hearing title"},
-        "committee": {"type": "object", "description": "Committee holding the hearing"}
+        "committee": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Committee name"},
+                "system_code": {"type": "string", "description": "Committee system code"},
+                "url": {"type": "string", "description": "URL to committee data"}
+            }
+        }
+    }
+})
+
+spec.components.schema("Amendment", {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "description": "Unique identifier for the amendment"},
+        "type": {"type": "string", "description": "Type of data (always 'amendment')"},
+        "congress": {"type": "integer", "description": "Congress number"},
+        "update_date": {"type": "string", "format": "date", "description": "Last update date"},
+        "amendment_number": {"type": "integer", "description": "Amendment number"},
+        "amendment_type": {"type": "string", "description": "Type of amendment"},
+        "title": {"type": "string", "description": "Amendment title"},
+        "description": {"type": "string", "description": "Amendment description"},
+        "purpose": {"type": "string", "description": "Amendment purpose"},
+        "latest_action": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Latest action text"},
+                "action_date": {"type": "string", "format": "date", "description": "Action date"}
+            }
+        }
+    }
+})
+
+spec.components.schema("Nomination", {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "description": "Unique identifier for the nomination"},
+        "type": {"type": "string", "description": "Type of data (always 'nomination')"},
+        "congress": {"type": "integer", "description": "Congress number"},
+        "update_date": {"type": "string", "format": "date", "description": "Last update date"},
+        "number": {"type": "integer", "description": "Nomination number"},
+        "received_date": {"type": "string", "format": "date", "description": "Date nomination was received"},
+        "description": {"type": "string", "description": "Nomination description"},
+        "organization": {"type": "string", "description": "Organization"},
+        "nomination_type": {
+            "type": "object",
+            "properties": {
+                "is_civilian": {"type": "boolean", "description": "Whether the nomination is civilian"}
+            }
+        },
+        "latest_action": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Latest action text"},
+                "action_date": {"type": "string", "format": "date", "description": "Action date"}
+            }
+        }
+    }
+})
+
+spec.components.schema("Treaty", {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "description": "Unique identifier for the treaty"},
+        "type": {"type": "string", "description": "Type of data (always 'treaty')"},
+        "congress": {"type": "integer", "description": "Congress number"},
+        "update_date": {"type": "string", "format": "date", "description": "Last update date"},
+        "treaty_number": {"type": "string", "description": "Treaty number"},
+        "description": {"type": "string", "description": "Treaty description"},
+        "country": {"type": "string", "description": "Country"},
+        "subject": {"type": "string", "description": "Subject"},
+        "received_date": {"type": "string", "format": "date", "description": "Date received"},
+        "latest_action": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Latest action text"},
+                "action_date": {"type": "string", "format": "date", "description": "Action date"}
+            }
+        }
     }
 })
 
@@ -250,7 +347,7 @@ def get_bills():
         # Extract results
         bills = response.get('Items', [])
         count = len(bills)
-        
+
         # Handle pagination
         pagination = {}
         if 'LastEvaluatedKey' in response:
@@ -390,7 +487,7 @@ def get_committees():
         # Extract results
         committees = response.get('Items', [])
         count = len(committees)
-        
+
         # Handle pagination
         pagination = {}
         if 'LastEvaluatedKey' in response:
@@ -542,7 +639,7 @@ def get_hearings():
         # Extract results
         hearings = response.get('Items', [])
         count = len(hearings)
-        
+
         # Handle pagination
         pagination = {}
         if 'LastEvaluatedKey' in response:
@@ -550,6 +647,426 @@ def get_hearings():
 
         return jsonify({
             "hearings": hearings,
+            "count": count,
+            **pagination
+        })
+
+    except ValueError as e:
+        logger.error(f"Invalid parameter: {str(e)}")
+        return jsonify({"error": f"Invalid parameter: {str(e)}", "status": 400}), 400
+    except ClientError as e:
+        logger.error(f"DynamoDB error: {str(e)}")
+        return jsonify({"error": f"Database error: {str(e)}", "status": 500}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return jsonify({"error": f"Unexpected error: {str(e)}", "status": 500}), 500
+
+
+@app.route("/api/amendments")
+def get_amendments():
+    """
+    Get amendments with optional filtering.
+    ---
+    get:
+      summary: Get amendments
+      description: Retrieve amendments with optional filtering by congress, amendment type, and date range
+      parameters:
+        - in: query
+          name: congress
+          schema:
+            type: integer
+          description: Filter by congress number (e.g., 117)
+        - in: query
+          name: amendment_type
+          schema:
+            type: string
+          description: Filter by amendment type
+        - in: query
+          name: start_date
+          schema:
+            type: string
+            format: date
+          description: Filter by update date (start date, format YYYY-MM-DD)
+        - in: query
+          name: end_date
+          schema:
+            type: string
+            format: date
+          description: Filter by update date (end date, format YYYY-MM-DD)
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 20
+          description: Maximum number of results to return
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  amendments:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Amendment'
+                  count:
+                    type: integer
+                  next_token:
+                    type: string
+        400:
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        500:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    """
+    try:
+        if not table:
+            return jsonify({"error": "DynamoDB not configured", "status": 500}), 500
+
+        # Parse query parameters
+        congress = request.args.get('congress')
+        amendment_type = request.args.get('amendment_type')
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date', datetime.now().strftime('%Y-%m-%d'))
+        limit = min(int(request.args.get('limit', 20)), 100)  # Cap at 100
+        next_token = request.args.get('next_token')
+
+        # Build query parameters
+        query_params = {
+            'FilterExpression': 'attribute_exists(id) AND #type = :type_val',
+            'ExpressionAttributeNames': {
+                '#type': 'type'
+            },
+            'ExpressionAttributeValues': {
+                ':type_val': 'amendment'
+            },
+            'Limit': limit
+        }
+
+        # Apply congress filter if provided
+        if congress:
+            query_params['FilterExpression'] += ' AND congress = :congress_val'
+            query_params['ExpressionAttributeValues'][':congress_val'] = int(congress)
+
+        # Apply amendment_type filter if provided
+        if amendment_type:
+            query_params['FilterExpression'] += ' AND amendment_type = :amendment_type_val'
+            query_params['ExpressionAttributeValues'][':amendment_type_val'] = amendment_type
+
+        # Apply date range filter if provided
+        if start_date:
+            query_params['FilterExpression'] += ' AND update_date BETWEEN :start_date AND :end_date'
+            query_params['ExpressionAttributeValues'][':start_date'] = start_date
+            query_params['ExpressionAttributeValues'][':end_date'] = end_date
+
+        # Add pagination token if provided
+        if next_token:
+            query_params['ExclusiveStartKey'] = json.loads(next_token)
+
+        # Execute query
+        logger.info(f"Executing DynamoDB query with params: {query_params}")
+        response = table.scan(**query_params)
+
+        # Extract results
+        amendments = response.get('Items', [])
+        count = len(amendments)
+
+        # Handle pagination
+        pagination = {}
+        if 'LastEvaluatedKey' in response:
+            pagination['next_token'] = json.dumps(response['LastEvaluatedKey'])
+
+        return jsonify({
+            "amendments": amendments,
+            "count": count,
+            **pagination
+        })
+
+    except ValueError as e:
+        logger.error(f"Invalid parameter: {str(e)}")
+        return jsonify({"error": f"Invalid parameter: {str(e)}", "status": 400}), 400
+    except ClientError as e:
+        logger.error(f"DynamoDB error: {str(e)}")
+        return jsonify({"error": f"Database error: {str(e)}", "status": 500}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return jsonify({"error": f"Unexpected error: {str(e)}", "status": 500}), 500
+
+
+@app.route("/api/nominations")
+def get_nominations():
+    """
+    Get nominations with optional filtering.
+    ---
+    get:
+      summary: Get nominations
+      description: Retrieve nominations with optional filtering by congress, organization, and date range
+      parameters:
+        - in: query
+          name: congress
+          schema:
+            type: integer
+          description: Filter by congress number (e.g., 117)
+        - in: query
+          name: organization
+          schema:
+            type: string
+          description: Filter by organization
+        - in: query
+          name: start_date
+          schema:
+            type: string
+            format: date
+          description: Filter by update date (start date, format YYYY-MM-DD)
+        - in: query
+          name: end_date
+          schema:
+            type: string
+            format: date
+          description: Filter by update date (end date, format YYYY-MM-DD)
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 20
+          description: Maximum number of results to return
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nominations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Nomination'
+                  count:
+                    type: integer
+                  next_token:
+                    type: string
+        400:
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        500:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    """
+    try:
+        if not table:
+            return jsonify({"error": "DynamoDB not configured", "status": 500}), 500
+
+        # Parse query parameters
+        congress = request.args.get('congress')
+        organization = request.args.get('organization')
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date', datetime.now().strftime('%Y-%m-%d'))
+        limit = min(int(request.args.get('limit', 20)), 100)  # Cap at 100
+        next_token = request.args.get('next_token')
+
+        # Build query parameters
+        query_params = {
+            'FilterExpression': 'attribute_exists(id) AND #type = :type_val',
+            'ExpressionAttributeNames': {
+                '#type': 'type'
+            },
+            'ExpressionAttributeValues': {
+                ':type_val': 'nomination'
+            },
+            'Limit': limit
+        }
+
+        # Apply congress filter if provided
+        if congress:
+            query_params['FilterExpression'] += ' AND congress = :congress_val'
+            query_params['ExpressionAttributeValues'][':congress_val'] = int(congress)
+
+        # Apply organization filter if provided
+        if organization:
+            query_params['FilterExpression'] += ' AND contains(organization, :organization_val)'
+            query_params['ExpressionAttributeValues'][':organization_val'] = organization
+
+        # Apply date range filter if provided
+        if start_date:
+            query_params['FilterExpression'] += ' AND update_date BETWEEN :start_date AND :end_date'
+            query_params['ExpressionAttributeValues'][':start_date'] = start_date
+            query_params['ExpressionAttributeValues'][':end_date'] = end_date
+
+        # Add pagination token if provided
+        if next_token:
+            query_params['ExclusiveStartKey'] = json.loads(next_token)
+
+        # Execute query
+        logger.info(f"Executing DynamoDB query with params: {query_params}")
+        response = table.scan(**query_params)
+
+        # Extract results
+        nominations = response.get('Items', [])
+        count = len(nominations)
+
+        # Handle pagination
+        pagination = {}
+        if 'LastEvaluatedKey' in response:
+            pagination['next_token'] = json.dumps(response['LastEvaluatedKey'])
+
+        return jsonify({
+            "nominations": nominations,
+            "count": count,
+            **pagination
+        })
+
+    except ValueError as e:
+        logger.error(f"Invalid parameter: {str(e)}")
+        return jsonify({"error": f"Invalid parameter: {str(e)}", "status": 400}), 400
+    except ClientError as e:
+        logger.error(f"DynamoDB error: {str(e)}")
+        return jsonify({"error": f"Database error: {str(e)}", "status": 500}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return jsonify({"error": f"Unexpected error: {str(e)}", "status": 500}), 500
+
+
+@app.route("/api/treaties")
+def get_treaties():
+    """
+    Get treaties with optional filtering.
+    ---
+    get:
+      summary: Get treaties
+      description: Retrieve treaties with optional filtering by congress, country, and date range
+      parameters:
+        - in: query
+          name: congress
+          schema:
+            type: integer
+          description: Filter by congress number (e.g., 117)
+        - in: query
+          name: country
+          schema:
+            type: string
+          description: Filter by country
+        - in: query
+          name: start_date
+          schema:
+            type: string
+            format: date
+          description: Filter by update date (start date, format YYYY-MM-DD)
+        - in: query
+          name: end_date
+          schema:
+            type: string
+            format: date
+          description: Filter by update date (end date, format YYYY-MM-DD)
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 20
+          description: Maximum number of results to return
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  treaties:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Treaty'
+                  count:
+                    type: integer
+                  next_token:
+                    type: string
+        400:
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        500:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    """
+    try:
+        if not table:
+            return jsonify({"error": "DynamoDB not configured", "status": 500}), 500
+
+        # Parse query parameters
+        congress = request.args.get('congress')
+        country = request.args.get('country')
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date', datetime.now().strftime('%Y-%m-%d'))
+        limit = min(int(request.args.get('limit', 20)), 100)  # Cap at 100
+        next_token = request.args.get('next_token')
+
+        # Build query parameters
+        query_params = {
+            'FilterExpression': 'attribute_exists(id) AND #type = :type_val',
+            'ExpressionAttributeNames': {
+                '#type': 'type'
+            },
+            'ExpressionAttributeValues': {
+                ':type_val': 'treaty'
+            },
+            'Limit': limit
+        }
+
+        # Apply congress filter if provided
+        if congress:
+            query_params['FilterExpression'] += ' AND congress = :congress_val'
+            query_params['ExpressionAttributeValues'][':congress_val'] = int(congress)
+
+        # Apply country filter if provided
+        if country:
+            query_params['FilterExpression'] += ' AND contains(country, :country_val)'
+            query_params['ExpressionAttributeValues'][':country_val'] = country
+
+        # Apply date range filter if provided
+        if start_date:
+            query_params['FilterExpression'] += ' AND update_date BETWEEN :start_date AND :end_date'
+            query_params['ExpressionAttributeValues'][':start_date'] = start_date
+            query_params['ExpressionAttributeValues'][':end_date'] = end_date
+
+        # Add pagination token if provided
+        if next_token:
+            query_params['ExclusiveStartKey'] = json.loads(next_token)
+
+        # Execute query
+        logger.info(f"Executing DynamoDB query with params: {query_params}")
+        response = table.scan(**query_params)
+
+        # Extract results
+        treaties = response.get('Items', [])
+        count = len(treaties)
+
+        # Handle pagination
+        pagination = {}
+        if 'LastEvaluatedKey' in response:
+            pagination['next_token'] = json.dumps(response['LastEvaluatedKey'])
+
+        return jsonify({
+            "treaties": treaties,
             "count": count,
             **pagination
         })
@@ -589,6 +1106,9 @@ with app.test_request_context():
     spec.path(view=get_bills)
     spec.path(view=get_committees)
     spec.path(view=get_hearings)
+    spec.path(view=get_amendments)
+    spec.path(view=get_nominations)
+    spec.path(view=get_treaties)
 
 # Write OpenAPI spec to file
 with open('static/swagger.json', 'w') as f:
