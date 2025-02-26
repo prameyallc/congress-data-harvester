@@ -1,0 +1,39 @@
+# Congress Data Downloader CODEOWNERS file
+#
+# This file specifies individuals or teams responsible for different parts of the codebase.
+# These owners will be automatically requested for review when a pull request modifies their code.
+# For more information, see: https://docs.github.com/en/github/creating-cloning-and-archiving-repositories/creating-a-repository-on-github/about-code-owners
+
+# Default owners for everything in the repo (if not overridden below)
+* @your-username
+
+# API client and rate limiting
+/congress_api.py @your-username
+
+# DynamoDB handler
+/dynamo_handler.py @your-username
+
+# Data validation
+/data_validator.py @your-username
+
+# API server endpoints
+/api_server.py @your-username
+
+# Metrics and monitoring
+/monitoring.py @your-username
+
+# Main downloader script
+/congress_downloader.py @your-username
+
+# Documentation
+/*.md @your-username
+/docs/ @your-username
+
+# Tests
+/test_*.py @your-username
+
+# Configuration
+/config.json @your-username
+
+# Replace @your-username with the actual GitHub username or team name
+# You can use multiple owners for each pattern, e.g.: /path/to/file @user1 @user2
