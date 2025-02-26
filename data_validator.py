@@ -592,14 +592,16 @@ class DataValidator:
             self.validation_stats[record_type]['invalid'] += 1
 
     def _is_valid_date(self, date_str: str) -> bool:
-        """Validate and normalize date string format"""
+        """Validate date string format"""
         if not date_str:
             return False
         try:
-            # Handle both ISO format with time and simple YYYY-MM-DD
-            from datetime import datetime
+            # Handle ISO format with time zone  
             if 'T' in date_str:
-                dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%SZ')
+                if 'Z' in date_str:
+                    datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%SZ')
+                else:
+                    datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
                 return True
             else:
                 datetime.strptime(date_str, '%Y-%m-%d')
@@ -607,16 +609,27 @@ class DataValidator:
         except ValueError:
             return False
 
+    def get_validation_stats(self) -> Dict[str, Any]:
+        """Get current validation statistics"""
+        return self.validation_stats
+
+    def reset_validation_stats(self) -> None:
+        """Reset validation statistics"""
+        self.validation_stats = {'total_processed': 0, 'by_type': {}}
+
     def _normalize_date(self, date_str: str) -> str:
         """Convert any valid date format to YYYY-MM-DD"""
         try:
-            from datetime import datetime
             if 'T' in date_str:
-                dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%SZ')
+                if 'Z' in date_str:
+                    dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%SZ')
+                else:
+                    dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
             else:
                 dt = datetime.strptime(date_str, '%Y-%m-%d')
             return dt.strftime('%Y-%m-%d')
-        except ValueError:
+        except ValueError as e:
+            self.logger.error(f"Failed to normalize date {date_str}: {str(e)}")
             return date_str
 
     def _validate_common_fields(self, item: Dict[str, Any]) -> List[str]:
@@ -702,6 +715,106 @@ class DataValidator:
         # Remove any empty fields
         cleaned = {k: v for k, v in cleaned.items() if v is not None and v != ''}
 
+        return cleaned
+
+    def validate_summary(self, summary: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate summary data structure"""
+        errors = []
+        required_fields = ['id', 'congress', 'update_date', 'text', 'version']
+
+        for field in required_fields:
+            if field not in summary:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            errors.extend(self._validate_common_fields(summary))
+
+            # Validate associated bill
+            if 'associated_bill' in summary:
+                bill = summary['associated_bill']
+                if not isinstance(bill, dict):
+                    errors.append("associated_bill must be a dictionary")
+                else:
+                    for field in ['congress', 'type', 'number', 'title']:
+                        if field not in bill:
+                            errors.append(f"Missing {field} in associated_bill")
+
+            # Date validations
+            for date_field in ['update_date', 'action_date', 'last_summary_update_date']:
+                if date_field in summary and summary[date_field]:
+                    if not self._is_valid_date(summary[date_field]):
+                        errors.append(f"Invalid {date_field} format: {summary[date_field]}")
+
+            # Text content validation
+            if 'text' in summary and not summary['text'].strip():
+                errors.append("Summary text cannot be empty")
+
+            # Version code validation
+            if 'version_code' in summary:
+                if not re.match(r'^[0-9]{2}$', str(summary['version_code'])):
+                    errors.append("Version code must be a two-digit number")
+
+            # Chamber validation
+            if 'current_chamber' in summary:
+                valid_chambers = ['House', 'Senate']
+                if summary['current_chamber'] not in valid_chambers:
+                    errors.append(f"Invalid current_chamber: {summary['current_chamber']}")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('summary', is_valid)
+        if not is_valid:
+            self.logger.warning(f"Summary validation failed: {', '.join(errors)}")
+            self.logger.debug(f"Invalid summary data: {json.dumps(summary, indent=2)}")
+
+        return is_valid, errors
+
+    def cleanup_summary(self, summary: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize summary data"""
+        cleaned = summary.copy()
+
+        # Map API response fields to schema fields
+        field_mapping = {
+            'lastSummaryUpdateDate': 'last_summary_update_date',
+            'actionDate': 'action_date',
+            'actionDesc': 'action_desc',
+            'versionCode': 'version_code',
+            'currentChamber': 'current_chamber',
+            'currentChamberCode': 'current_chamber_code'
+        }
+
+        for api_field, schema_field in field_mapping.items():
+            if api_field in cleaned:
+                cleaned[schema_field] = cleaned[api_field]
+                del cleaned[api_field]
+
+        # Normalize dates
+        for date_field in ['update_date', 'action_date', 'last_summary_update_date']:
+            if date_field in cleaned and cleaned[date_field]:
+                cleaned[date_field] = self._normalize_date(cleaned[date_field])
+
+        # Normalize text content
+        if 'text' in cleaned:
+            cleaned['text'] = cleaned['text'].strip()
+
+        # Normalize version code
+        if 'version_code' in cleaned:
+            cleaned['version_code'] = str(cleaned['version_code']).zfill(2)
+
+        # Clean associated bill data
+        if 'associated_bill' in cleaned and isinstance(cleaned['associated_bill'], dict):
+            bill = cleaned['associated_bill']
+            cleaned['associated_bill'] = {
+                'congress': bill.get('congress', cleaned.get('congress')),
+                'type': bill.get('type', '').lower(),
+                'number': bill.get('number', ''),
+                'title': bill.get('title', '').strip(),
+                'origin_chamber': bill.get('origin_chamber', ''),
+                'origin_chamber_code': bill.get('origin_chamber_code', ''),
+                'url': bill.get('url', '')
+            }
+
+        # Apply common cleanup
+        cleaned = self._cleanup_common_fields(cleaned)
         return cleaned
 
     def cleanup_data(self, data: Dict[str, Any], data_type: str) -> Dict[str, Any]:

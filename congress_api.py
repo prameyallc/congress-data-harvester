@@ -358,12 +358,104 @@ class CongressAPI(CongressBaseAPI):
         super().__init__(config)
         self.validator = DataValidator()
 
+    def _process_summary(self, summary: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a bill summary"""
+        try:
+            if not isinstance(summary, dict):
+                self.logger.error(f"Invalid summary data type: {type(summary)}")
+                return None
+
+            # Extract bill info first as it's required for ID generation
+            bill_info = summary.get('bill', {})
+            if not bill_info:
+                self.logger.error("Missing required bill information in summary")
+                return None
+
+            # Generate ID first to avoid processing invalid records
+            summary_id = self._generate_summary_id(summary, current_congress)
+            if not summary_id:
+                self.logger.warning("Unable to generate ID for summary, skipping record")
+                return None
+
+            # Create transformed summary data with all available fields
+            transformed_summary = {
+                'id': summary_id,
+                'type': 'summary',
+                'congress': current_congress,
+                'update_date': summary.get('updateDate', ''),
+                'version': 1,
+                'text': summary.get('text', ''),
+                'action_date': summary.get('actionDate', ''),
+                'action_desc': summary.get('actionDesc', ''),
+                'version_code': summary.get('versionCode', '00'),
+                'current_chamber': summary.get('currentChamber', ''),
+                'current_chamber_code': summary.get('currentChamberCode', ''),
+                'last_summary_update_date': summary.get('lastSummaryUpdateDate', ''),
+                'associated_bill': {
+                    'congress': bill_info.get('congress', current_congress),
+                    'type': bill_info.get('type', '').lower(),
+                    'number': bill_info.get('number', ''),
+                    'title': bill_info.get('title', ''),
+                    'origin_chamber': bill_info.get('originChamber', ''),
+                    'origin_chamber_code': bill_info.get('originChamberCode', ''),
+                    'url': bill_info.get('url', '')
+                }
+            }
+
+            # Validate the transformed data
+            is_valid, errors = self.validator.validate_summary(transformed_summary)
+            if not is_valid:
+                self.logger.error(f"Summary {summary_id} failed validation: {errors}")
+                return None
+
+            cleaned_summary = self.validator.cleanup_summary(transformed_summary)
+            self.logger.debug(f"Successfully processed summary: {summary_id}")
+            return cleaned_summary
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform summary: {str(e)}")
+            self.logger.error(f"Raw summary data: {json.dumps(summary, indent=2)}")
+            return None
+
+    def _generate_summary_id(self, summary: Dict, current_congress: int) -> Optional[str]:
+        """Generate a summary ID from summary data"""
+        try:
+            bill_info = summary.get('bill', {})
+            if not bill_info:
+                self.logger.warning("No bill info found in summary data")
+                return None
+
+            # Extract required fields
+            bill_type = bill_info.get('type', '').lower()
+            bill_number = bill_info.get('number', '')
+            version = summary.get('versionCode', '00')
+            action_date = summary.get('actionDate', '')
+
+            # Validate required fields
+            if not all([bill_type, bill_number, action_date]):
+                self.logger.warning(
+                    f"Missing required fields for summary ID generation: "
+                    f"type={bill_type}, number={bill_number}, date={action_date}"
+                )
+                return None
+
+            # Create unique ID incorporating action date to handle multiple summaries
+            date_str = action_date.replace('-', '')
+            summary_id = f"sum_{current_congress}_{bill_type}_{bill_number}_{version}_{date_str}"
+            
+            self.logger.debug(f"Generated summary ID: {summary_id}")
+            return summary_id
+
+        except Exception as e:
+            self.logger.error(f"Failed to generate summary ID: {str(e)}")
+            return None
+
     def _process_congress(self, congress_data: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a congress record"""
         try:
             # Initial type validation
             if not isinstance(congress_data, dict):
-                self.logger.error(f"Invalid congress data type: {type(congress_data)}, value: {congress_data}")
+                self.logger.error(f"Invalid congress data type: {type(congress_data)}")
                 return None
                 
             # Handle both direct and nested congress data structures
@@ -374,15 +466,18 @@ class CongressAPI(CongressBaseAPI):
             
             # Validate data is a dict
             if not isinstance(data, dict):
-                self.logger.error(f"Invalid congress data type: {type(data)}, value: {data}")
+                self.logger.error(f"Invalid congress data type: {type(data)}")
                 return None
 
-            # Extract key fields
-            congress_number = data.get('number', 0)
+            # Extract and validate congress number
+            congress_number = data.get('number')
             try:
                 congress_number = int(congress_number)
+                if congress_number < 1 or congress_number > 150:  # Reasonable range check
+                    self.logger.error(f"Invalid congress number: {congress_number}")
+                    return None
             except (ValueError, TypeError):
-                self.logger.error(f"Invalid congress number: {congress_number}")
+                self.logger.error(f"Invalid congress number format: {congress_number}")
                 return None
                 
             # Generate congress ID
@@ -391,24 +486,31 @@ class CongressAPI(CongressBaseAPI):
                 self.logger.error("Failed to generate congress ID")
                 return None
 
+            # Extract session data
+            sessions = []
+            for session in data.get('sessions', []):
+                if isinstance(session, dict):
+                    sessions.append({
+                        'chamber': session.get('chamber', ''),
+                        'number': session.get('number'),
+                        'start_date': session.get('startDate', ''),
+                        'end_date': session.get('endDate', ''),
+                        'type': session.get('type', '')
+                    })
+
             # Create transformed congress data
             transformed_congress = {
                 'id': congress_id,
                 'type': 'congress',
                 'congress': congress_number,
+                'name': data.get('name', f'{congress_number}th Congress'),
+                'start_year': data.get('startYear', ''),
+                'end_year': data.get('endYear', ''),
                 'update_date': data.get('updateDate', datetime.now().strftime('%Y-%m-%d')),
                 'version': 1,
-                'start_date': data.get('startDate', ''),
-                'end_date': data.get('endDate', ''),
+                'sessions': sessions,
                 'url': data.get('url', '')
             }
-            
-            # Add additional fields if present
-            if 'senate' in data:
-                transformed_congress['senate'] = data.get('senate', {})
-            
-            if 'house' in data:
-                transformed_congress['house'] = data.get('house', {})
             
             # Validate the transformed data
             is_valid, errors = self.validator.validate_congress(transformed_congress)
@@ -417,8 +519,9 @@ class CongressAPI(CongressBaseAPI):
                 self.logger.error(f"Invalid congress data: {json.dumps(transformed_congress, indent=2)}")
                 return None
 
-            # Clean up and return the data
-            return self.validator.cleanup_congress(transformed_congress)
+            cleaned_congress = self.validator.cleanup_congress(transformed_congress)
+            self.logger.debug(f"Successfully processed congress: {congress_id}")
+            return cleaned_congress
             
         except Exception as e:
             self.logger.error(f"Failed to transform congress: {str(e)}")
@@ -493,16 +596,24 @@ class CongressAPI(CongressBaseAPI):
                 'limit': 20
             }
             
-            # Add congress parameter for specific endpoints
-            if endpoint_name in ['committee', 'committee-meeting']:
+            # Add endpoint-specific parameters
+            if endpoint_name in ['committee', 'committee-meeting', 'committee-print']:
                 params['congress'] = current_congress
-            
-            # For congress endpoint, different parameter structure
-            if endpoint_name == 'congress':
-                params = {
-                    'format': 'json',
-                    'limit': 20
-                }
+                params['chamber'] = 'house,senate'  # Request data from both chambers
+            elif endpoint_name in ['daily-congressional-record', 'bound-congressional-record']:
+                # Parse date for year/month parameters
+                dt = datetime.strptime(date_str, '%Y-%m-%d')
+                params.update({
+                    'year': dt.year,
+                    'month': dt.month
+                })
+                # Remove datetime parameters for these endpoints
+                params.pop('fromDateTime', None)
+                params.pop('toDateTime', None)
+            elif endpoint_name == 'congress':
+                # Congress endpoint doesn't use datetime parameters
+                params.pop('fromDateTime', None)
+                params.pop('toDateTime', None)
 
             all_items = []
             total_items = 0
@@ -580,7 +691,7 @@ class CongressAPI(CongressBaseAPI):
                         elif endpoint_name == 'member':
                             processed_item = self._process_member(item, current_congress)
                         elif endpoint_name == 'summaries':
-                            processed_item = self._process_summaries(item, current_congress)
+                            processed_item = self._process_summary(item, current_congress)
                         elif endpoint_name == 'committee-print':
                             processed_item = self._process_committee_print(item, current_congress)
                         elif endpoint_name == 'committee-meeting':
