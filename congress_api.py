@@ -483,7 +483,7 @@ class CongressAPI(CongressBaseAPI):
     def _get_endpoint_data(self, endpoint_name: str, date_str: str, current_congress: int) -> List[Dict]:
         """Get data for a specific endpoint and date"""
         try:
-            self.logger.info(f"Fetching {endpoint_name} data for {date_str}")
+            self.logger.info(f"Fetching {endpoint_name} for date {date_str} (offset: 0)")
             
             # Define endpoint-specific parameters
             params = {
@@ -505,6 +505,8 @@ class CongressAPI(CongressBaseAPI):
                 }
 
             all_items = []
+            total_items = 0
+            processed_items = 0
             offset = 0
             
             while True:
@@ -512,9 +514,9 @@ class CongressAPI(CongressBaseAPI):
                 self.logger.debug(f"Making request to {endpoint_name} with params: {json.dumps(params, indent=2)}")
                 
                 response = self._make_request(endpoint_name, params)
-                self.logger.debug(f"Raw API response for {endpoint_name}: {json.dumps(response, indent=2)}")
+                self.logger.debug(f"Response contains keys: {list(response.keys())}")
                 
-                # Map endpoint names to their response keys (updated with actual API response keys)
+                # Map endpoint names to their response keys
                 endpoint_key_map = {
                     'bill': 'bills',
                     'amendment': 'amendments',
@@ -532,16 +534,14 @@ class CongressAPI(CongressBaseAPI):
                     'committee-meeting': 'committeeMeetings',
                     'daily-congressional-record': 'dailyCongressionalRecords',
                     'bound-congressional-record': 'boundCongressionalRecord',
-                    'congress': 'congresses'  # Added response key for congress endpoint
+                    'congress': 'congresses'
                 }
                 
-                # Get the correct key for this endpoint
                 data_key = endpoint_key_map.get(endpoint_name)
                 if not data_key:
                     self.logger.warning(f"No response key mapping found for endpoint {endpoint_name}")
                     return []
                 
-                # Extract items from response
                 items = response.get(data_key, [])
                 if not items:
                     self.logger.warning(f"No items found in response for {endpoint_name}")
@@ -549,37 +549,52 @@ class CongressAPI(CongressBaseAPI):
                         self.logger.warning("Pagination indicates data exists but none was returned")
                     break
                     
-                self.logger.info(f"Retrieved {len(items)} items from {endpoint_name}")
+                total_items += len(items)
+                self.logger.info(f"Found {len(items)} items in '{data_key}' key")
                 
-                # Process each item based on its type
                 for item in items:
                     try:
                         processed_item = None
                         
-                        # Log the raw item for debugging
-                        self.logger.debug(f"Processing {endpoint_name} item: {json.dumps(item, indent=2)}")
-                        
+                        # Process based on endpoint type
                         if endpoint_name == 'bill':
                             processed_item = self._process_bill(item, current_congress)
-                        elif endpoint_name == 'committee':
-                            processed_item = self._process_committee(item, current_congress)
-                        elif endpoint_name == 'hearing':
-                            processed_item = self._process_hearing(item, current_congress)
                         elif endpoint_name == 'amendment':
                             processed_item = self._process_amendment(item, current_congress)
                         elif endpoint_name == 'nomination':
                             processed_item = self._process_nomination(item, current_congress)
                         elif endpoint_name == 'treaty':
                             processed_item = self._process_treaty(item, current_congress)
+                        elif endpoint_name == 'committee':
+                            processed_item = self._process_committee(item, current_congress)
+                        elif endpoint_name == 'hearing':
+                            processed_item = self._process_hearing(item, current_congress)
+                        elif endpoint_name == 'committee-report':
+                            processed_item = self._process_committee_report(item, current_congress)
+                        elif endpoint_name == 'congressional-record':
+                            processed_item = self._process_congressional_record(item, current_congress)
+                        elif endpoint_name == 'house-communication':
+                            processed_item = self._process_house_communication(item, current_congress)
+                        elif endpoint_name == 'senate-communication':
+                            processed_item = self._process_senate_communication(item, current_congress)
+                        elif endpoint_name == 'member':
+                            processed_item = self._process_member(item, current_congress)
+                        elif endpoint_name == 'summaries':
+                            processed_item = self._process_summaries(item, current_congress)
+                        elif endpoint_name == 'committee-print':
+                            processed_item = self._process_committee_print(item, current_congress)
+                        elif endpoint_name == 'committee-meeting':
+                            processed_item = self._process_committee_meeting(item, current_congress)
+                        elif endpoint_name == 'daily-congressional-record':
+                            processed_item = self._process_daily_congressional_record(item, current_congress)
                         elif endpoint_name == 'bound-congressional-record':
                             processed_item = self._process_bound_congressional_record(item, current_congress)
                         elif endpoint_name == 'congress':
                             processed_item = self._process_congress(item, current_congress)
-                        # Add other endpoint processors as needed
                         
                         if processed_item:
                             all_items.append(processed_item)
-                            self.logger.debug(f"Successfully processed {endpoint_name} item: {json.dumps(processed_item, indent=2)}")
+                            processed_items += 1
                         else:
                             self.logger.warning(f"Failed to process {endpoint_name} item: {json.dumps(item, indent=2)}")
                             
@@ -587,6 +602,10 @@ class CongressAPI(CongressBaseAPI):
                         self.logger.error(f"Error processing {endpoint_name} item: {str(e)}")
                         self.logger.error(f"Problematic item: {json.dumps(item, indent=2)}")
                         continue
+                
+                # Log success rate for this batch
+                success_rate = (processed_items / total_items * 100) if total_items > 0 else 0
+                self.logger.info(f"Successfully processed {processed_items} out of {total_items} {endpoint_name} items ({success_rate:.1f}%)")
                 
                 # Check for pagination
                 pagination = response.get('pagination', {})
@@ -601,7 +620,6 @@ class CongressAPI(CongressBaseAPI):
                     self.logger.warning(f"Reached maximum offset for {endpoint_name}")
                     break
             
-            self.logger.info(f"Total {endpoint_name} items processed: {len(all_items)}")
             return all_items
             
         except Exception as e:

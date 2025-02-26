@@ -226,6 +226,46 @@ class DataValidator:
 
         return is_valid, errors
 
+    def cleanup_nomination(self, nomination: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize nomination data"""
+        cleaned = nomination.copy()
+
+        # Extract number from citation if present
+        if 'citation' in cleaned:
+            try:
+                number_str = cleaned['citation'].replace('PN', '').split('-')[0].strip()
+                cleaned['number'] = int(number_str)
+            except (ValueError, IndexError):
+                self.logger.warning(f"Could not extract number from citation: {cleaned['citation']}")
+                cleaned['number'] = 0  # Default value for invalid number
+
+        # Map API response fields to schema fields
+        field_mapping = {
+            'latestAction': 'latest_action',
+            'nominationType': 'nomination_type',
+            'receivedDate': 'received_date',
+            'organizationType': 'organization_type'
+        }
+        
+        # Map API fields to schema fields
+        for api_field, schema_field in field_mapping.items():
+            if api_field in cleaned:
+                cleaned[schema_field] = cleaned[api_field]
+                del cleaned[api_field]
+
+        # Format dates
+        for date_field in ['received_date', 'update_date']:
+            if date_field in cleaned and cleaned[date_field]:
+                cleaned[date_field] = self._normalize_date(cleaned[date_field])
+
+        # Normalize organization name
+        if 'organization' in cleaned:
+            cleaned['organization'] = cleaned['organization'].strip()
+
+        # Apply common cleanup
+        cleaned = self._cleanup_common_fields(cleaned)
+        return cleaned
+
     def validate_treaty(self, treaty: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """Validate treaty data structure"""
         errors = []
@@ -812,7 +852,8 @@ class DataValidator:
             try:
                 number_str = cleaned['citation'].replace('PN', '').split('-')[0].strip()
                 cleaned['number'] = int(number_str)
-            except (ValueError, IndexError):                self.logger.warning(f"Could not extract number from citation: {cleaned['citation']}")
+            except (ValueError, IndexError):
+                self.logger.warning(f"Could not extract number from citation: {cleaned['citation']}")
                 cleaned['number'] = 0  # Default value for invalid number
 
         # Map API response fields to schema fields
@@ -1615,7 +1656,7 @@ class DataValidator:
 
             # Type validation
             if congress.get('type') != 'congress':
-                errors.append(f"Invalid type: {congress`.get('type')}. Expected: congress")
+                errors.append(f"Invalid type: {congress.get('type')}. Expected: congress")
 
             # Validate house and senate data if present
             if 'house' in congress and not isinstance(congress['house'], dict):
