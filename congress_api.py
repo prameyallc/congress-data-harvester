@@ -357,7 +357,8 @@ class CongressAPI(CongressBaseAPI):
                 'committee-meeting': self._process_committee_meeting,
                 'daily-congressional-record': self._process_daily_congressional_record,
                 'bound-congressional-record': self._process_bound_congressional_record,
-                'congress': self._process_congress
+                'congress': self._process_congress,
+                'house-requirement': self._process_house_requirement
             }
 
             if endpoint_name not in processor_map:
@@ -392,7 +393,8 @@ class CongressAPI(CongressBaseAPI):
                 'committee-meeting': self._generate_meeting_id,
                 'daily-congressional-record': self._generate_daily_record_id,
                 'bound-congressional-record': self._generate_bound_record_id,
-                'congress': self._generate_congress_id
+                'congress': self._generate_congress_id,
+                'house-requirement': self._generate_house_req_id
             }
 
             if endpoint_name not in generator_map:
@@ -706,9 +708,10 @@ class CongressAPI(CongressBaseAPI):
                 'summaries': 'summaries',
                 'committee-print': 'committeePrints',
                 'committee-meeting': 'committeeMeetings',
-                'daily-congressional-record': 'dailyCongressionalRecords',
-                'bound-congressional-record': 'boundCongressionalRecords',
-                'congress': 'congresses'
+                'daily-congressional-record': 'dailyCongressionalRecord',  # Note: singular form
+                'bound-congressional-record': 'boundCongressionalRecord',  # Note: singular form
+                'congress': 'congresses',
+                'house-requirement': 'houseRequirements'  # Added house-requirement endpoint
             }
 
             all_items = []
@@ -722,10 +725,9 @@ class CongressAPI(CongressBaseAPI):
             while True:
                 params['offset'] = offset
                 self.logger.debug(
-                    f"Making request to {endpoint_name} with params: "
-                    f"{json.dumps({k: v for k, v in params.items() if k != 'api_key'}, indent=2)}"
-                )
-                
+                    f"Making request to {endpoint_name} with params: " +
+                    f"{json.dumps({k: v for k, v in params.items() if k != 'api_key'}, indent=2)}")
+
                 response = self._make_request(endpoint_name, params)
                 self.logger.debug(f"Response keys for {endpoint_name}: {list(response.keys())}")
                 
@@ -733,6 +735,228 @@ class CongressAPI(CongressBaseAPI):
                 if not data_key:
                     self.logger.warning(f"No response key mapping for {endpoint_name}")
                     break
+
+    def _process_daily_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a daily congressional record"""
+        try:
+            if not isinstance(record, dict):
+                self.logger.error(f"Invalid daily record data type: {type(record)}")
+                return None
+                
+            # Generate ID first to avoid processing invalid records
+            record_id = self._generate_daily_record_id(record, current_congress)
+            if not record_id:
+                self.logger.warning("Unable to generate ID for daily congressional record")
+                return None
+
+            # Create transformed record data
+            transformed_record = {
+                'id': record_id,
+                'type': 'daily-congressional-record',
+                'congress': current_congress,
+                'update_date': record.get('updateDate', datetime.now().strftime('%Y-%m-%d')),
+                'version': 1,
+                'chamber': record.get('chamber', ''),
+                'date': record.get('date', ''),
+                'year': record.get('year', ''),
+                'month': record.get('month', ''),
+                'day': record.get('day', ''),
+                'title': record.get('title', ''),
+                'description': record.get('description', ''),
+                'url': record.get('url', '')
+            }
+
+            # Validate the transformed data
+            is_valid, errors = self.validator.validate_daily_record(transformed_record)
+            if not is_valid:
+                self.logger.error(f"Daily record {record_id} failed validation: {errors}")
+                return None
+
+            cleaned_record = self.validator.cleanup_daily_record(transformed_record)
+            self.logger.debug(f"Successfully processed daily congressional record: {record_id}")
+            return cleaned_record
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform daily congressional record: {str(e)}")
+            self.logger.error(f"Raw record data: {json.dumps(record, indent=2)}")
+            return None
+
+    def _generate_daily_record_id(self, record: Dict, current_congress: int) -> Optional[str]:
+        """Generate a daily congressional record ID"""
+        try:
+            year = record.get('year', '')
+            month = record.get('month', '')
+            day = record.get('day', '')
+            
+            # Validate required fields
+            if not all([year, month, day]):
+                self.logger.warning(
+                    f"Missing required fields for daily record ID generation: "
+                    f"year={year}, month={month}, day={day}"
+                )
+                return None
+                
+            # Pad month and day with leading zeros if needed
+            month_str = str(month).zfill(2)
+            day_str = str(day).zfill(2)
+            
+            # Create ID using date components
+            record_id = f"dcr_{year}{month_str}{day_str}"
+            
+            self.logger.debug(f"Generated daily record ID: {record_id}")
+            return record_id
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate daily record ID: {str(e)}")
+            return None
+
+    def _process_bound_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a bound congressional record"""
+        try:
+            if not isinstance(record, dict):
+                self.logger.error(f"Invalid bound record data type: {type(record)}")
+                return None
+                
+            # Generate ID first to avoid processing invalid records
+            record_id = self._generate_bound_record_id(record, current_congress)
+            if not record_id:
+                self.logger.warning("Unable to generate ID for bound congressional record")
+                return None
+
+            # Create transformed record data
+            transformed_record = {
+                'id': record_id,
+                'type': 'bound-congressional-record',
+                'congress': record.get('congress', current_congress),
+                'update_date': record.get('updateDate', datetime.now().strftime('%Y-%m-%d')),
+                'version': 1,
+                'volume': record.get('volume', ''),
+                'part': record.get('part', ''),
+                'year': record.get('year', ''),
+                'month': record.get('month', ''),
+                'page_range': record.get('pageRange', ''),
+                'title': record.get('title', ''),
+                'description': record.get('description', ''),
+                'url': record.get('url', '')
+            }
+
+            # Validate the transformed data
+            is_valid, errors = self.validator.validate_bound_record(transformed_record)
+            if not is_valid:
+                self.logger.error(f"Bound record {record_id} failed validation: {errors}")
+                return None
+
+            cleaned_record = self.validator.cleanup_bound_record(transformed_record)
+            self.logger.debug(f"Successfully processed bound congressional record: {record_id}")
+            return cleaned_record
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform bound congressional record: {str(e)}")
+            self.logger.error(f"Raw record data: {json.dumps(record, indent=2)}")
+            return None
+
+    def _generate_bound_record_id(self, record: Dict, current_congress: int) -> Optional[str]:
+        """Generate a bound congressional record ID"""
+        try:
+            volume = record.get('volume', '')
+            part = record.get('part', '')
+            year = record.get('year', '')
+            month = record.get('month', '')
+            
+            # Validate required fields
+            if not all([volume, year]):
+                self.logger.warning(
+                    f"Missing required fields for bound record ID generation: "
+                    f"volume={volume}, year={year}"
+                )
+                return None
+                
+            # Pad month with leading zeros if needed
+            month_str = str(month).zfill(2) if month else '00'
+            part_str = str(part) if part else '0'
+            
+            # Create ID using volume, part, and date components
+            record_id = f"bcr_{volume}_{part_str}_{year}{month_str}"
+            
+            self.logger.debug(f"Generated bound record ID: {record_id}")
+            return record_id
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate bound record ID: {str(e)}")
+            return None
+
+    def _process_house_requirement(self, requirement: Dict, current_congress: int) -> Optional[Dict]:
+        """Process and validate a house requirement"""
+        try:
+            if not isinstance(requirement, dict):
+                self.logger.error(f"Invalid house requirement data type: {type(requirement)}")
+                return None
+                
+            # Generate ID first to avoid processing invalid records
+            requirement_id = self._generate_house_req_id(requirement, current_congress)
+            if not requirement_id:
+                self.logger.warning("Unable to generate ID for house requirement")
+                return None
+
+            # Create transformed requirement data
+            transformed_req = {
+                'id': requirement_id,
+                'type': 'house-requirement',
+                'congress': current_congress,
+                'update_date': requirement.get('updateDate', datetime.now().strftime('%Y-%m-%d')),
+                'version': 1,
+                'title': requirement.get('title', ''),
+                'category': requirement.get('category', ''),
+                'description': requirement.get('description', ''),
+                'date': requirement.get('date', ''),
+                'chamber': 'House',
+                'url': requirement.get('url', '')
+            }
+
+            # Validate the transformed data
+            is_valid, errors = self.validator.validate_house_requirement(transformed_req)
+            if not is_valid:
+                self.logger.error(f"House requirement {requirement_id} failed validation: {errors}")
+                return None
+
+            cleaned_req = self.validator.cleanup_house_requirement(transformed_req)
+            self.logger.debug(f"Successfully processed house requirement: {requirement_id}")
+            return cleaned_req
+
+        except Exception as e:
+            self.logger.error(f"Failed to transform house requirement: {str(e)}")
+            self.logger.error(f"Raw requirement data: {json.dumps(requirement, indent=2)}")
+            return None
+
+    def _generate_house_req_id(self, requirement: Dict, current_congress: int) -> Optional[str]:
+        """Generate a house requirement ID"""
+        try:
+            title = requirement.get('title', '')
+            date = requirement.get('date', '')
+            category = requirement.get('category', '')
+            
+            # Validate required fields
+            if not all([title, date]):
+                self.logger.warning(
+                    f"Missing required fields for house requirement ID generation: "
+                    f"title={title}, date={date}"
+                )
+                return None
+                
+            # Create a slug from the title
+            title_slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
+            date_str = date.replace('-', '')
+            category_slug = re.sub(r'[^a-z0-9]+', '-', category.lower()).strip('-') if category else 'general'
+            
+            # Create ID using date, category, and title
+            req_id = f"hreq_{current_congress}_{date_str}_{category_slug}_{title_slug[:30]}"
+            
+            self.logger.debug(f"Generated house requirement ID: {req_id}")
+            return req_id
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate house requirement ID: {str(e)}")
+            return None
 
                 items = response.get(data_key, [])
                 if not items:
