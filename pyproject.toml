@@ -4,8 +4,13 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
+    "apispec>=6.8.1",
+    "apispec-webframeworks>=1.2.0",
     "boto3>=1.36.25",
     "botocore>=1.36.25",
+    "flask>=3.1.0",
+    "flask-swagger-ui>=4.11.1",
+    "marshmallow>=3.26.1",
     "psutil>=7.0.0",
     "requests>=2.32.3",
     "trafilatura>=2.0.0",
