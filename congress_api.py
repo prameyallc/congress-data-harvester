@@ -640,6 +640,7 @@ class CongressAPI(CongressBaseAPI):
 
     def _get_endpoint_data(self, endpoint_name: str, date_str: str, current_congress: int) -> List[Dict]:
         """Get data for a specific endpoint and date"""
+        params = {}
         try:
             self.logger.info(f"Fetching {endpoint_name} data for date {date_str}")
             
@@ -735,6 +736,64 @@ class CongressAPI(CongressBaseAPI):
                 if not data_key:
                     self.logger.warning(f"No response key mapping for {endpoint_name}")
                     break
+                    
+                items = response.get(data_key, [])
+                if not items:
+                    if response.get('pagination', {}).get('count', 0) > 0:
+                        self.logger.warning(
+                            f"Pagination indicates data exists but none returned for {endpoint_name}"
+                        )
+                    else:
+                        self.logger.info(f"No items found for {endpoint_name} at offset {offset}")
+                    break
+
+                batch_items = []
+                for item in items:
+                    processed_item = self._process_item(endpoint_name, item, current_congress)
+                    if processed_item:
+                        batch_items.append(processed_item)
+                        processed_count += 1
+                    else:
+                        self.logger.warning(
+                            f"Failed to process {endpoint_name} item: {json.dumps(item, indent=2)}"
+                        )
+
+                if batch_items:
+                    all_items.extend(batch_items)
+                    total_items += len(batch_items)
+                    processed_items += len(batch_items)
+                    self.logger.info(
+                        f"Processed {len(batch_items)} items from {endpoint_name} "
+                        f"(total processed: {processed_items}, success rate: "
+                        f"{(processed_count/total_items*100):.1f}%)"
+                    )
+
+                # Check if we need to fetch more pages
+                pagination = response.get('pagination', {})
+                if not pagination or offset + len(items) >= pagination.get('count', 0):
+                    break
+
+                offset += len(items)
+                if offset > 10000:  # Safety limit
+                    self.logger.warning(f"Reached maximum offset for {endpoint_name}")
+                    break
+
+            # Final summary
+            if total_items > 0:
+                success_rate = (processed_items / total_items) * 100
+                self.logger.info(
+                    f"Completed processing {endpoint_name}: {processed_items} successful out of "
+                    f"{total_items} total items ({success_rate:.1f}% success rate)"
+                )
+            else:
+                self.logger.info(f"No items found for {endpoint_name}")
+
+            return all_items
+
+        except Exception as e:
+            self.logger.error(f"Failed to get {endpoint_name} data: {str(e)}")
+            self.logger.error(f"Parameters used: {json.dumps(params, indent=2)}")
+            return []
 
     def _process_daily_congressional_record(self, record: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a daily congressional record"""
@@ -957,65 +1016,6 @@ class CongressAPI(CongressBaseAPI):
         except Exception as e:
             self.logger.error(f"Failed to generate house requirement ID: {str(e)}")
             return None
-
-                items = response.get(data_key, [])
-                if not items:
-                    if response.get('pagination', {}).get('count', 0) > 0:
-                        self.logger.warning(
-                            f"Pagination indicates data exists but none returned for {endpoint_name}"
-                        )
-                    else:
-                        self.logger.info(f"No items found for {endpoint_name} at offset {offset}")
-                    break
-
-                batch_items = []
-                for item in items:
-                    processed_item = self._process_item(endpoint_name, item, current_congress)
-                    if processed_item:
-                        batch_items.append(processed_item)
-                        processed_count += 1
-                    else:
-                        self.logger.warning(
-                            f"Failed to process {endpoint_name} item: {json.dumps(item, indent=2)}"
-                        )
-
-                if batch_items:
-                    all_items.extend(batch_items)
-                    total_items += len(batch_items)
-                    processed_items += len(batch_items)
-                    self.logger.info(
-                        f"Processed {len(batch_items)} items from {endpoint_name} "
-                        f"(total processed: {processed_items}, success rate: "
-                        f"{(processed_count/total_items*100):.1f}%)"
-                    )
-
-                # Check if we need to fetch more pages
-                pagination = response.get('pagination', {})
-                if not pagination or offset + len(items) >= pagination.get('count', 0):
-                    break
-
-                offset += len(items)
-                if offset > 10000:  # Safety limit
-                    self.logger.warning(f"Reached maximum offset for {endpoint_name}")
-                    break
-
-            # Final summary
-            if total_items > 0:
-                success_rate = (processed_items / total_items) * 100
-                self.logger.info(
-                    f"Completed processing {endpoint_name}: {processed_items} successful out of "
-                    f"{total_items} total items ({success_rate:.1f}% success rate)"
-                )
-            else:
-                self.logger.info(f"No items found for {endpoint_name}")
-
-            return all_items
-
-        except Exception as e:
-            self.logger.error(f"Failed to get {endpoint_name} data: {str(e)}")
-            if 'params' in locals():
-                self.logger.error(f"Parameters used: {json.dumps(params, indent=2)}")
-            return []
 
     def _process_committee_print(self, print_data: Dict, current_congress: int) -> Optional[Dict]:
         """Process and validate a committee print"""

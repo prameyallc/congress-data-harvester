@@ -15,7 +15,7 @@ class DataValidator:
         """Update validation statistics for monitoring"""
         if 'by_type' not in self.validation_stats:
             self.validation_stats['by_type'] = {}
-            
+
         if record_type not in self.validation_stats['by_type']:
             self.validation_stats['by_type'][record_type] = {
                 'processed': 0,
@@ -155,126 +155,401 @@ class DataValidator:
 
         return cleaned
 
-    # Stub methods for validators
+    # Validation methods for all endpoints
     def validate_bill(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for bill validation"""
-        return True, []
+        """Validate bill data"""
+        errors = self._validate_common_fields(data)
+        # Add bill-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('bill', is_valid)
+        return is_valid, errors
 
     def validate_amendment(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for amendment validation"""
-        return True, []
+        """Validate amendment data"""
+        errors = self._validate_common_fields(data)
+        # Add amendment-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('amendment', is_valid)
+        return is_valid, errors
 
     def validate_nomination(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for nomination validation"""
-        return True, []
+        """Validate nomination data"""
+        errors = self._validate_common_fields(data)
+        # Add nomination-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('nomination', is_valid)
+        return is_valid, errors
 
     def validate_treaty(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for treaty validation"""
-        return True, []
+        """Validate treaty data"""
+        errors = self._validate_common_fields(data)
+        # Add treaty-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('treaty', is_valid)
+        return is_valid, errors
 
     def validate_committee_report(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for committee report validation"""
-        return True, []
+        """Validate committee report data"""
+        errors = self._validate_common_fields(data)
+        # Add committee report-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('committee-report', is_valid)
+        return is_valid, errors
 
     def validate_congressional_record(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for congressional record validation"""
-        return True, []
+        """Validate congressional record data"""
+        errors = self._validate_common_fields(data)
+        # Add congressional record-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('congressional-record', is_valid)
+        return is_valid, errors
 
     def validate_house_communication(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for house communication validation"""
-        return True, []
+        """Validate house communication data"""
+        errors = self._validate_common_fields(data)
+        # Add house communication-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('house-communication', is_valid)
+        return is_valid, errors
 
     def validate_committee(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for committee validation"""
-        return True, []
+        """Validate committee data"""
+        errors = self._validate_common_fields(data)
+        # Add committee-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('committee', is_valid)
+        return is_valid, errors
 
     def validate_hearing(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for hearing validation"""
-        return True, []
+        """Validate hearing data"""
+        errors = self._validate_common_fields(data)
+        # Add hearing-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('hearing', is_valid)
+        return is_valid, errors
 
     def validate_senate_communication(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for senate communication validation"""
-        return True, []
+        """Validate senate communication data"""
+        errors = self._validate_common_fields(data)
+        # Add senate communication-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('senate-communication', is_valid)
+        return is_valid, errors
 
     def validate_member(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for member validation"""
-        return True, []
+        """Validate member data"""
+        errors = self._validate_common_fields(data)
+        # Add member-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('member', is_valid)
+        return is_valid, errors
 
     def validate_summary(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for summary validation"""
-        return True, []
+        """Validate summary data"""
+        errors = self._validate_common_fields(data)
+        # Add summary-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('summary', is_valid)
+        return is_valid, errors
 
     def validate_committee_print(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for committee print validation"""
-        return True, []
+        """Validate committee print data"""
+        errors = self._validate_common_fields(data)
+        # Add committee print-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('committee-print', is_valid)
+        return is_valid, errors
 
     def validate_committee_meeting(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for committee meeting validation"""
-        return True, []
+        """Validate committee meeting data"""
+        errors = self._validate_common_fields(data)
+        # Add committee meeting-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('committee-meeting', is_valid)
+        return is_valid, errors
+
+    def validate_daily_congressional_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate daily congressional record data structure"""
+        errors = []
+        required_fields = ['id', 'congress', 'update_date', 'date', 'year', 'month', 'day']
+
+        for field in required_fields:
+            if field not in record:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            errors.extend(self._validate_common_fields(record))
+
+            # Validate year, month, day
+            try:
+                year = int(record['year'])
+                if year < 1789 or year > datetime.now().year:
+                    errors.append(f"Invalid year: {year}")
+
+                month = int(record['month'])
+                if month < 1 or month > 12:
+                    errors.append(f"Invalid month: {month}")
+
+                day = int(record['day'])
+                if day < 1 or day > 31:
+                    errors.append(f"Invalid day: {day}")
+
+                # Validate that date matches year/month/day
+                if 'date' in record and record['date']:
+                    date_parts = record['date'].split('-')
+                    if len(date_parts) == 3:
+                        date_year = int(date_parts[0])
+                        date_month = int(date_parts[1])
+                        date_day = int(date_parts[2])
+                        if date_year != year or date_month != month or date_day != day:
+                            errors.append(f"Date {record['date']} does not match year/month/day: {year}/{month}/{day}")
+            except (ValueError, TypeError):
+                errors.append("Year, month, and day must be valid numbers")
+
+            # Date validations
+            for date_field in ['date', 'update_date']:
+                if date_field in record and record[date_field]:
+                    if not self._is_valid_date(record[date_field]):
+                        errors.append(f"Invalid {date_field} format: {record[date_field]}")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('daily-congressional-record', is_valid)
+        if not is_valid:
+            self.logger.warning(f"Daily congressional record validation failed: {', '.join(errors)}")
+            self.logger.debug(f"Invalid record data: {json.dumps(record, indent=2)}")
+
+        return is_valid, errors
+
+    def validate_bound_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate bound congressional record data structure"""
+        errors = []
+        required_fields = ['id', 'congress', 'update_date', 'volume', 'year']
+
+        for field in required_fields:
+            if field not in record:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            errors.extend(self._validate_common_fields(record))
+
+            # Validate volume
+            try:
+                volume = int(record['volume'])
+                if volume < 1:
+                    errors.append(f"Invalid volume: {volume}")
+            except (ValueError, TypeError):
+                errors.append("Volume must be a valid number")
+
+            # Validate year
+            try:
+                year = int(record['year'])
+                if year < 1789 or year > datetime.now().year:
+                    errors.append(f"Invalid year: {year}")
+            except (ValueError, TypeError):
+                errors.append("Year must be a valid number")
+
+            # Validate month if present
+            if 'month' in record and record['month']:
+                try:
+                    month = int(record['month'])
+                    if month < 1 or month > 12:
+                        errors.append(f"Invalid month: {month}")
+                except (ValueError, TypeError):
+                    errors.append("Month must be a valid number")
+
+            # Date validations
+            for date_field in ['update_date']:
+                if date_field in record and record[date_field]:
+                    if not self._is_valid_date(record[date_field]):
+                        errors.append(f"Invalid {date_field} format: {record[date_field]}")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('bound-congressional-record', is_valid)
+        if not is_valid:
+            self.logger.warning(f"Bound congressional record validation failed: {', '.join(errors)}")
+            self.logger.debug(f"Invalid record data: {json.dumps(record, indent=2)}")
+
+        return is_valid, errors
+
+    def validate_house_requirement(self, requirement: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate house requirement data structure"""
+        errors = []
+        required_fields = ['id', 'congress', 'update_date', 'title', 'category']
+
+        for field in required_fields:
+            if field not in requirement:
+                errors.append(f"Missing required field: {field}")
+
+        if not errors:
+            errors.extend(self._validate_common_fields(requirement))
+
+            # Validate category
+            if 'category' in requirement and not requirement['category'].strip():
+                errors.append("Category cannot be empty")
+
+            # Validate title
+            if 'title' in requirement and not requirement['title'].strip():
+                errors.append("Title cannot be empty")
+
+            # Date validations
+            for date_field in ['date', 'update_date']:
+                if date_field in requirement and requirement[date_field]:
+                    if not self._is_valid_date(requirement[date_field]):
+                        errors.append(f"Invalid {date_field} format: {requirement[date_field]}")
+
+        is_valid = len(errors) == 0
+        self._update_validation_stats('house-requirement', is_valid)
+        if not is_valid:
+            self.logger.warning(f"House requirement validation failed: {', '.join(errors)}")
+            self.logger.debug(f"Invalid requirement data: {json.dumps(requirement, indent=2)}")
+
+        return is_valid, errors
 
     def validate_congress(self, data: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Stub for congress validation"""
-        return True, []
+        """Validate congress data"""
+        errors = self._validate_common_fields(data)
+        # Add congress-specific validation if needed
+        is_valid = len(errors) == 0
+        self._update_validation_stats('congress', is_valid)
+        return is_valid, errors
 
-    # Stubs for cleanup methods
+    # Cleanup methods for all endpoints
     def cleanup_bill(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for bill cleanup"""
+        """Cleanup bill data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_amendment(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for amendment cleanup"""
+        """Cleanup amendment data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_nomination(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for nomination cleanup"""
+        """Cleanup nomination data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_treaty(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for treaty cleanup"""
+        """Cleanup treaty data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_committee_report(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for committee report cleanup"""
+        """Cleanup committee report data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_congressional_record(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for congressional record cleanup"""
+        """Cleanup congressional record data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_house_communication(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for house communication cleanup"""
+        """Cleanup house communication data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_committee(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for committee cleanup"""
+        """Cleanup committee data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_hearing(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for hearing cleanup"""
+        """Cleanup hearing data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_senate_communication(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for senate communication cleanup"""
+        """Cleanup senate communication data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_member(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for member cleanup"""
+        """Cleanup member data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_summary(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for summary cleanup"""
+        """Cleanup summary data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_committee_print(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for committee print cleanup"""
+        """Cleanup committee print data"""
         return self._cleanup_common_fields(data)
 
     def cleanup_committee_meeting(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for committee meeting cleanup"""
+        """Cleanup committee meeting data"""
         return self._cleanup_common_fields(data)
 
+    def cleanup_daily_congressional_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize daily congressional record data"""
+        cleaned = record.copy()
+
+        # Convert numeric fields
+        for field in ['congress', 'year', 'month', 'day']:
+            if field in cleaned:
+                try:
+                    cleaned[field] = int(cleaned[field])
+                except (ValueError, TypeError):
+                    self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
+
+        # Normalize text fields
+        for field in ['title', 'description']:
+            if field in cleaned:
+                cleaned[field] = ' '.join(cleaned[field].split())
+
+        # Normalize dates
+        for date_field in ['date', 'update_date']:
+            if date_field in cleaned and cleaned[date_field]:
+                cleaned[date_field] = self._normalize_date(cleaned[date_field])
+
+        # Apply common cleanup
+        cleaned = self._cleanup_common_fields(cleaned)
+        return cleaned
+
+    def cleanup_bound_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize bound congressional record data"""
+        cleaned = record.copy()
+
+        # Convert numeric fields
+        for field in ['congress', 'volume', 'year', 'month', 'part']:
+            if field in cleaned:
+                try:
+                    cleaned[field] = int(cleaned[field])
+                except (ValueError, TypeError):
+                    self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
+
+        # Normalize text fields
+        for field in ['title', 'description', 'page_range']:
+            if field in cleaned:
+                cleaned[field] = ' '.join(cleaned[field].split())
+
+        # Normalize dates
+        for date_field in ['update_date']:
+            if date_field in cleaned and cleaned[date_field]:
+                cleaned[date_field] = self._normalize_date(cleaned[date_field])
+
+        # Apply common cleanup
+        cleaned = self._cleanup_common_fields(cleaned)
+        return cleaned
+
+    def cleanup_house_requirement(self, requirement: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean and normalize house requirement data"""
+        cleaned = requirement.copy()
+
+        # Convert numeric fields
+        for field in ['congress']:
+            if field in cleaned:
+                try:
+                    cleaned[field] = int(cleaned[field])
+                except (ValueError, TypeError):
+                    self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
+
+        # Normalize text fields
+        for field in ['title', 'category', 'description']:
+            if field in cleaned:
+                cleaned[field] = ' '.join(cleaned[field].split())
+
+        # Normalize dates
+        for date_field in ['date', 'update_date']:
+            if date_field in cleaned and cleaned[date_field]:
+                cleaned[date_field] = self._normalize_date(cleaned[date_field])
+
+        # Apply common cleanup
+        cleaned = self._cleanup_common_fields(cleaned)
+        return cleaned
+
     def cleanup_congress(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Stub for congress cleanup"""
+        """Cleanup congress data"""
         return self._cleanup_common_fields(data)
 
     def validate_data(self, data: Dict[str, Any], data_type: str) -> Tuple[bool, List[str]]:
@@ -353,218 +628,3 @@ class DataValidator:
         else:
             self.logger.warning(f"No cleanup function for data type: {data_type}")
             return data
-
-    def validate_daily_congressional_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Validate daily congressional record data structure"""
-        errors = []
-        required_fields = ['id', 'congress', 'update_date', 'date', 'year', 'month', 'day']
-
-        for field in required_fields:
-            if field not in record:
-                errors.append(f"Missing required field: {field}")
-
-        if not errors:
-            errors.extend(self._validate_common_fields(record))
-
-            # Validate year, month, day
-            try:
-                year = int(record['year'])
-                if year < 1789 or year > datetime.now().year:
-                    errors.append(f"Invalid year: {year}")
-
-                month = int(record['month'])
-                if month < 1 or month > 12:
-                    errors.append(f"Invalid month: {month}")
-
-                day = int(record['day'])
-                if day < 1 or day > 31:
-                    errors.append(f"Invalid day: {day}")
-
-                # Validate that date matches year/month/day
-                if 'date' in record and record['date']:
-                    date_parts = record['date'].split('-')
-                    if len(date_parts) == 3:
-                        date_year = int(date_parts[0])
-                        date_month = int(date_parts[1])
-                        date_day = int(date_parts[2])
-                        if date_year != year or date_month != month or date_day != day:
-                            errors.append(f"Date {record['date']} does not match year/month/day: {year}/{month}/{day}")
-            except (ValueError, TypeError):
-                errors.append("Year, month, and day must be valid numbers")
-
-            # Date validations
-            for date_field in ['date', 'update_date']:
-                if date_field in record and record[date_field]:
-                    if not self._is_valid_date(record[date_field]):
-                        errors.append(f"Invalid {date_field} format: {record[date_field]}")
-
-        is_valid = len(errors) == 0
-        self._update_validation_stats('daily-congressional-record', is_valid)
-        if not is_valid:
-            self.logger.warning(f"Daily congressional record validation failed: {', '.join(errors)}")
-            self.logger.debug(f"Invalid record data: {json.dumps(record, indent=2)}")
-
-        return is_valid, errors
-
-    def cleanup_daily_congressional_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        """Clean and normalize daily congressional record data"""
-        cleaned = record.copy()
-
-        # Convert numeric fields
-        for field in ['congress', 'year', 'month', 'day']:
-            if field in cleaned:
-                try:
-                    cleaned[field] = int(cleaned[field])
-                except (ValueError, TypeError):
-                    self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
-
-        # Normalize text fields
-        for field in ['title', 'description']:
-            if field in cleaned:
-                cleaned[field] = ' '.join(cleaned[field].split())
-
-        # Normalize dates
-        for date_field in ['date', 'update_date']:
-            if date_field in cleaned and cleaned[date_field]:
-                cleaned[date_field] = self._normalize_date(cleaned[date_field])
-
-        # Apply common cleanup
-        cleaned = self._cleanup_common_fields(cleaned)
-        return cleaned
-
-    def validate_bound_record(self, record: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Validate bound congressional record data structure"""
-        errors = []
-        required_fields = ['id', 'congress', 'update_date', 'volume', 'year']
-
-        for field in required_fields:
-            if field not in record:
-                errors.append(f"Missing required field: {field}")
-
-        if not errors:
-            errors.extend(self._validate_common_fields(record))
-
-            # Validate volume
-            try:
-                volume = int(record['volume'])
-                if volume < 1:
-                    errors.append(f"Invalid volume: {volume}")
-            except (ValueError, TypeError):
-                errors.append("Volume must be a valid number")
-
-            # Validate year
-            try:
-                year = int(record['year'])
-                if year < 1789 or year > datetime.now().year:
-                    errors.append(f"Invalid year: {year}")
-            except (ValueError, TypeError):
-                errors.append("Year must be a valid number")
-
-            # Validate month if present
-            if 'month' in record and record['month']:
-                try:
-                    month = int(record['month'])
-                    if month < 1 or month > 12:
-                        errors.append(f"Invalid month: {month}")
-                except (ValueError, TypeError):
-                    errors.append("Month must be a valid number")
-
-            # Date validations
-            for date_field in ['update_date']:
-                if date_field in record and record[date_field]:
-                    if not self._is_valid_date(record[date_field]):
-                        errors.append(f"Invalid {date_field} format: {record[date_field]}")
-
-        is_valid = len(errors) == 0
-        self._update_validation_stats('bound-congressional-record', is_valid)
-        if not is_valid:
-            self.logger.warning(f"Bound congressional record validation failed: {', '.join(errors)}")
-            self.logger.debug(f"Invalid record data: {json.dumps(record, indent=2)}")
-
-        return is_valid, errors
-
-    def cleanup_bound_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        """Clean and normalize bound congressional record data"""
-        cleaned = record.copy()
-
-        # Convert numeric fields
-        for field in ['congress', 'volume', 'year', 'month', 'part']:
-            if field in cleaned:
-                try:
-                    cleaned[field] = int(cleaned[field])
-                except (ValueError, TypeError):
-                    self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
-
-        # Normalize text fields
-        for field in ['title', 'description', 'page_range']:
-            if field in cleaned:
-                cleaned[field] = ' '.join(cleaned[field].split())
-
-        # Normalize dates
-        for date_field in ['update_date']:
-            if date_field in cleaned and cleaned[date_field]:
-                cleaned[date_field] = self._normalize_date(cleaned[date_field])
-
-        # Apply common cleanup
-        cleaned = self._cleanup_common_fields(cleaned)
-        return cleaned
-
-    def validate_house_requirement(self, requirement: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Validate house requirement data structure"""
-        errors = []
-        required_fields = ['id', 'congress', 'update_date', 'title', 'category']
-
-        for field in required_fields:
-            if field not in requirement:
-                errors.append(f"Missing required field: {field}")
-
-        if not errors:
-            errors.extend(self._validate_common_fields(requirement))
-
-            # Validate category
-            if 'category' in requirement and not requirement['category'].strip():
-                errors.append("Category cannot be empty")
-
-            # Validate title
-            if 'title' in requirement and not requirement['title'].strip():
-                errors.append("Title cannot be empty")
-
-            # Date validations
-            for date_field in ['date', 'update_date']:
-                if date_field in requirement and requirement[date_field]:
-                    if not self._is_valid_date(requirement[date_field]):
-                        errors.append(f"Invalid {date_field} format: {requirement[date_field]}")
-
-        is_valid = len(errors) == 0
-        self._update_validation_stats('house-requirement', is_valid)
-        if not is_valid:
-            self.logger.warning(f"House requirement validation failed: {', '.join(errors)}")
-            self.logger.debug(f"Invalid requirement data: {json.dumps(requirement, indent=2)}")
-
-        return is_valid, errors
-
-    def cleanup_house_requirement(self, requirement: Dict[str, Any]) -> Dict[str, Any]:
-        """Clean and normalize house requirement data"""
-        cleaned = requirement.copy()
-
-        # Convert numeric fields
-        for field in ['congress']:
-            if field in cleaned:
-                try:
-                    cleaned[field] = int(cleaned[field])
-                except (ValueError, TypeError):
-                    self.logger.warning(f"Could not convert {field} to integer: {cleaned[field]}")
-
-        # Normalize text fields
-        for field in ['title', 'category', 'description']:
-            if field in cleaned:
-                cleaned[field] = ' '.join(cleaned[field].split())
-
-        # Normalize dates
-        for date_field in ['date', 'update_date']:
-            if date_field in cleaned and cleaned[date_field]:
-                cleaned[date_field] = self._normalize_date(cleaned[date_field])
-
-        # Apply common cleanup
-        cleaned = self._cleanup_common_fields(cleaned)
-        return cleaned
