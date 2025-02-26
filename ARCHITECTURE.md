@@ -74,6 +74,7 @@ Features:
 - Error recovery
 - Connection management
 - Query optimization
+- Deduplication of records
 
 ```python
 class DynamoHandler:
@@ -94,6 +95,7 @@ Metrics:
 - Error rates
 - Resource usage
 - Operation counts
+- Endpoint-specific statistics
 
 ```python
 class MetricsCollector:
@@ -277,3 +279,225 @@ class ResourceManager:
 - Custom metrics
 - Alert integration
 - Dashboard creation
+
+## Deduplication Mechanism
+
+The Congress Data Downloader implements a robust deduplication strategy to prevent duplicate items from being stored in DynamoDB. This is crucial for efficiency and preventing errors when processing data from the Congress.gov API.
+
+### Deduplication Strategy
+
+```mermaid
+graph TD
+    A[Incoming Items] --> B{Check ID in Processed Set?}
+    B -- Yes --> C[Skip Item]
+    B -- No --> D[Process Item]
+    D --> E[Add ID to Processed Set]
+    E --> F[Store in DynamoDB]
+```
+
+### Implementation Details
+
+1. **Processed Items Tracking**
+   - The `DynamoHandler` maintains an in-memory set `processed_item_ids` to track item IDs that have already been processed
+   - This set is checked before attempting to write any item to DynamoDB
+
+```python
+def batch_store_items(self, items):
+    # First, deduplicate the input list based on item ID
+    deduplicated_items = []
+    item_ids_in_batch = set()
+
+    for item in items:
+        if 'id' not in item:
+            continue
+
+        item_id = item['id']
+        # Skip if already processed in this session or in this batch
+        if item_id in self.processed_item_ids or item_id in item_ids_in_batch:
+            self.logger.debug(f"Skipping duplicate item with ID: {item_id}")
+            duplicate_items += 1
+            continue
+
+        deduplicated_items.append(item)
+        item_ids_in_batch.add(item_id)
+```
+
+2. **Lifecycle Management**
+   - The set is reset at strategic points to prevent memory bloat:
+     - At the beginning of processing a new date range
+     - When processing a new date chunk
+     - When starting a bulk download
+
+```python
+def process_date_chunk(api_client, db_handler, dates, logger):
+    for date in dates:
+        try:
+            # Reset processed IDs tracking for each date
+            db_handler.reset_processed_ids()
+            # Process date...
+```
+
+3. **Metrics and Reporting**
+   - Duplicate detection is tracked and reported for monitoring
+   - The system tracks:
+     - Total items processed
+     - Duplicate items skipped
+     - Successful items stored
+     - Failed items
+
+### Benefits
+
+1. **Error Prevention**: Prevents "Duplicate Key" errors from DynamoDB
+2. **Performance**: Reduces unnecessary write operations
+3. **Cost Efficiency**: Minimizes DynamoDB write units consumed
+4. **Consistency**: Ensures each unique item is stored only once
+
+## Enhanced Error Handling
+
+The system implements a sophisticated error handling strategy to ensure reliability when interacting with the Congress.gov API.
+
+### Rate Limiting with Adaptive Backoff
+
+The `RateLimiter` class implements intelligent rate limiting with:
+
+1. **Endpoint-specific Rate Limits**
+   - Different endpoints have tailored request rates
+   - High-volume endpoints (bill, amendment) have more conservative limits
+
+2. **Dynamic Health Tracking**
+   - Endpoints experiencing errors have their request rates automatically reduced
+   - System tracks error rates per endpoint to adjust accordingly
+
+3. **Exponential Backoff with Jitter**
+   - Failed requests trigger increasing backoff periods
+   - Random jitter prevents thundering herd problem
+
+```python
+def wait(self, endpoint):
+    # Base wait time with endpoint-specific adjustment
+    base_wait = 1.0 / self.get_rate_limit(endpoint)
+
+    # Add jitter
+    jitter = uniform(-0.15 * base_wait, 0.15 * base_wait)
+    wait_time = max(0, base_wait + jitter)
+
+    # Get health factor for endpoint
+    health_factor = self.get_health_factor(endpoint)
+    if health_factor > 1.0:
+        wait_time *= health_factor
+
+    # Apply exponential backoff if there were errors
+    error_count = self.consecutive_errors.get(endpoint, 0)
+    if error_count > 0:
+        backoff_multiplier = min(2 ** (error_count + 1), 120)
+        wait_time *= backoff_multiplier
+```
+
+### Enhanced HTTP Request Handling
+
+1. **Adaptive Timeouts**
+   - Timeouts are configured per endpoint type
+   - Larger response endpoints (bills, amendments) have longer timeouts
+
+2. **Comprehensive Error Classification**
+   - Network errors are classified and logged specifically
+   - Timeout errors distinguish between connection and read timeouts
+   - Rate limit responses honor Retry-After headers with jitter
+
+3. **Detailed Response Logging**
+   - Success responses include timing and size metrics
+   - Error responses include detailed status and headers
+   - All metrics are tracked for reporting and troubleshooting
+
+## Metrics and Reporting
+
+The enhanced monitoring system provides comprehensive metrics about system operation:
+
+### API Statistics
+
+1. **Per-endpoint metrics**
+   - Request counts and rates
+   - Success/failure counts and rates
+   - Average response times
+   - Rate limit waits
+   - Error counts by type
+
+2. **Overall system metrics**
+   - Total requests processed
+   - Error rates
+   - System uptime
+   - Resource utilization
+
+### Ingestion Statistics
+
+1. **Per-endpoint ingestion metrics**
+   - Items successfully stored
+   - Duplicate items detected
+   - Failed items
+   - Storage timing
+
+2. **Detailed Reports**
+   - Human-readable summaries of API and ingestion metrics
+   - Success rates by endpoint
+   - Error breakdowns
+   - Performance indicators
+
+```python
+def generate_api_metrics_report(self):
+    """Generate a detailed report on API usage metrics"""
+    report_lines = ["API METRICS REPORT"]
+    report_lines.append("=" * 80)
+    report_lines.append(f"Session duration: {self._format_duration(time.time() - self.session_start_time)}")
+    report_lines.append("")
+
+    # Add endpoint summary
+    report_lines.append("ENDPOINT STATISTICS")
+    report_lines.append("-" * 80)
+    report_lines.append(f"{'Endpoint':<25} {'Requests':<10} {'Success':<10} {'Failures':<10} {'Rate Limits':<12} {'Avg Duration':<15}")
+    report_lines.append("-" * 80)
+
+    # ... generate detailed metrics
+```
+
+## Troubleshooting Guide
+
+### Common Issues
+
+1. **Rate Limit Errors**
+   - Symptoms: HTTP 429 responses, increasing backoff times
+   - Solutions:
+     - Reduce parallel workers
+     - Decrease requests_per_second in config
+     - Space out data collection over time
+
+2. **DynamoDB Capacity Errors**
+   - Symptoms: ProvisionedThroughputExceeded errors
+   - Solutions:
+     - Increase table capacity
+     - Implement additional batch retries
+     - Add randomized exponential backoff
+
+3. **Timeout Errors**
+   - Symptoms: Read timeout or connection timeout errors
+   - Solutions:
+     - Check network connectivity
+     - Increase endpoint timeout in configuration
+     - Verify API endpoint health
+
+### Monitoring Best Practices
+
+1. **Regular Health Checks**
+   - Run health_check.py daily to verify all endpoints
+   - Review error logs and metrics
+   - Monitor DynamoDB capacity utilization
+
+2. **Metrics Review**
+   - Track API request success rates over time
+   - Monitor for endpoint degradation
+   - Watch for increasing error rates
+
+3. **Alerting**
+   - Set up alerts for:
+     - High error rates (>10%)
+     - Excessive rate limiting
+     - DynamoDB capacity warnings

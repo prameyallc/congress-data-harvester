@@ -18,7 +18,7 @@ class RateLimiter:
     
     def __init__(self, config: Dict[str, Any]) -> None:
         self.requests_per_second = config.get('requests_per_second', 5)
-        self.max_retries = config.get('max_retries', 3)
+        self.max_retries = config.get('max_retries', 5)  # Increased from 3 to 5
         self.retry_delay = config.get('retry_delay', 1)
         self.last_request_time: Dict[str, float] = {}
         self.consecutive_errors: Dict[str, int] = {}
@@ -26,6 +26,21 @@ class RateLimiter:
         self.endpoint_counts: Dict[str, int] = {}
         self.start_time = time.time()
         self.test_mode = config.get('test_mode', False)
+        # New: Track endpoint-specific rate limits
+        self.endpoint_rate_limits = {
+            'bill': 3.0,  # Conservative limits for high-volume endpoints
+            'amendment': 3.0,
+            'nomination': 3.0,
+            'treaty': 4.0,
+            'committee': 4.0,
+            'hearing': 4.0,
+            'default': 5.0  # Default limit for other endpoints
+        }
+        # New: Tracking endpoint health
+        self.endpoint_health = {}
+        # New: Track total backoff and wait time for reporting
+        self.total_backoff_time = 0 
+        self.total_wait_time = 0
 
     def wait(self, endpoint: str) -> None:
         """Implement rate limiting with jitter for specific endpoint"""
@@ -47,27 +62,37 @@ class RateLimiter:
             self.logger.debug(
                 f"Rate stats for {endpoint}: "
                 f"{self.endpoint_counts[endpoint]} requests in {elapsed_time:.1f}s "
-                f"(current rate: {current_rate:.2f} req/s, limit: {self.requests_per_second} req/s)"
+                f"(current rate: {current_rate:.2f} req/s, limit: {self.get_rate_limit(endpoint)} req/s)"
             )
         
         # Base wait time with endpoint-specific adjustment
-        base_wait = 1.0 / self.requests_per_second
-        if endpoint in ['bill', 'amendment', 'nomination']:  # High-volume endpoints
-            base_wait *= 1.5
+        base_wait = 1.0 / self.get_rate_limit(endpoint)
         
-        # Add jitter (±10% of base wait time)
-        jitter = uniform(-0.1 * base_wait, 0.1 * base_wait)
+        # Enhanced jitter: Add jitter (±15% of base wait time for better distribution)
+        jitter = uniform(-0.15 * base_wait, 0.15 * base_wait)
         wait_time = max(0, base_wait + jitter)
+        
+        # Get health factor for endpoint (1.0 is healthy, >1.0 means slow down)
+        health_factor = self.get_health_factor(endpoint)
+        if health_factor > 1.0:
+            self.logger.info(
+                f"Applying health factor {health_factor:.2f}x to {endpoint} due to recent errors"
+            )
+            wait_time *= health_factor
         
         # Apply exponential backoff if there were errors
         error_count = self.consecutive_errors.get(endpoint, 0)
         if error_count > 0:
-            backoff_multiplier = min(2 ** error_count, 60)
+            # Enhanced exponential backoff - more aggressive for higher error counts
+            backoff_multiplier = min(2 ** (error_count + 1), 120)  # Increased max from 60 to 120
             wait_time *= backoff_multiplier
             self.logger.warning(
                 f"Rate limit backoff for {endpoint}: "
-                f"waiting {wait_time:.2f} seconds after {error_count} consecutive errors"
+                f"waiting {wait_time:.2f} seconds after {error_count} consecutive errors "
+                f"(backoff multiplier: {backoff_multiplier}x)"
             )
+            # Track total backoff time for reporting
+            self.total_backoff_time += wait_time
         
         if time_since_last_request < wait_time:
             sleep_time = wait_time - time_since_last_request
@@ -76,25 +101,105 @@ class RateLimiter:
                 f"waiting {sleep_time:.2f}s "
                 f"(last request: {time_since_last_request:.2f}s ago)"
             )
+            # Track wait time metrics 
             metrics.track_rate_limit_wait(endpoint, sleep_time)
+            self.total_wait_time += sleep_time
             time.sleep(sleep_time)
         
         self.last_request_time[endpoint] = time.time()
 
+    def get_rate_limit(self, endpoint: str) -> float:
+        """Get rate limit for specific endpoint with dynamic adjustment"""
+        # Get base rate limit
+        base_limit = self.endpoint_rate_limits.get(
+            endpoint, self.endpoint_rate_limits['default']
+        )
+        
+        # Apply dynamic adjustment based on error history
+        error_count = self.consecutive_errors.get(endpoint, 0)
+        if error_count > 0:
+            # Reduce rate limit by 20% for each recent error, down to 25% of original
+            adjustment_factor = max(0.25, 1.0 - (0.2 * error_count))
+            return base_limit * adjustment_factor
+        
+        return base_limit
+
+    def get_health_factor(self, endpoint: str) -> float:
+        """Calculate health factor for an endpoint based on recent errors
+        1.0 means healthy, higher values mean slow down requests
+        """
+        if endpoint not in self.endpoint_health:
+            self.endpoint_health[endpoint] = {
+                'errors_last_hour': 0,
+                'requests_last_hour': 1,  # Avoid division by zero
+                'last_error_time': 0
+            }
+        
+        health = self.endpoint_health[endpoint]
+        error_rate = health['errors_last_hour'] / health['requests_last_hour']
+        
+        # If error rate is high, slow down requests
+        if error_rate > 0.2:  # More than 20% errors
+            return 1.0 + (error_rate * 5)  # Up to 6x slowdown for 100% error rate
+        
+        # If recent error, apply mild slowdown
+        if time.time() - health['last_error_time'] < 300:  # Last 5 minutes
+            return 1.5  # 50% slowdown for recent errors
+            
+        return 1.0  # Healthy
+        
     def record_success(self, endpoint: str) -> None:
-        """Record successful request"""
+        """Record successful request with enhanced health tracking"""
         prev_errors = self.consecutive_errors.get(endpoint, 0)
         if prev_errors > 0:
             self.logger.info(f"Reset error count for {endpoint} after successful request")
         self.consecutive_errors[endpoint] = 0
+        
+        # Update health tracking
+        if endpoint in self.endpoint_health:
+            self.endpoint_health[endpoint]['requests_last_hour'] += 1
+            
+        # Log successful request for important endpoints
+        if endpoint in ['bill', 'amendment', 'nomination', 'treaty', 'committee']:
+            self.logger.info(
+                f"Successful API request to {endpoint} endpoint "
+                f"(total so far: {self.endpoint_counts.get(endpoint, 0)})"
+            )
 
-    def record_error(self, endpoint: str) -> None:
-        """Record failed request"""
+    def record_error(self, endpoint: str, error_type: str = 'unknown') -> None:
+        """Record failed request with enhanced error tracking"""
         self.consecutive_errors[endpoint] = self.consecutive_errors.get(endpoint, 0) + 1
+        
+        # Update health tracking
+        if endpoint not in self.endpoint_health:
+            self.endpoint_health[endpoint] = {
+                'errors_last_hour': 0,
+                'requests_last_hour': 1,
+                'last_error_time': 0
+            }
+        
+        health = self.endpoint_health[endpoint]
+        health['errors_last_hour'] += 1
+        health['requests_last_hour'] += 1
+        health['last_error_time'] = time.time()
+        
+        error_count = self.consecutive_errors[endpoint]
         self.logger.warning(
-            f"Recorded error for {endpoint} "
-            f"(consecutive errors: {self.consecutive_errors[endpoint]})"
+            f"Recorded {error_type} error for {endpoint} "
+            f"(consecutive errors: {error_count}, "
+            f"error rate: {(health['errors_last_hour']/health['requests_last_hour']*100):.1f}%)"
         )
+        
+    def get_stats(self) -> Dict[str, Any]:
+        """Get rate limiter statistics for reporting"""
+        return {
+            'total_requests': sum(self.endpoint_counts.values()),
+            'endpoint_counts': self.endpoint_counts.copy(),
+            'consecutive_errors': self.consecutive_errors.copy(),
+            'total_wait_time': self.total_wait_time,
+            'total_backoff_time': self.total_backoff_time,
+            'uptime': time.time() - self.start_time
+        }
 
 class CongressBaseAPI:
     """Base class for Congress.gov API interactions"""
@@ -107,9 +212,24 @@ class CongressBaseAPI:
             raise ValueError("Congress.gov API key not found in environment or config")
         self.session = self._setup_session()
         self.logger = logging.getLogger('congress_downloader')
-        self.timeout = (5, 30)  # (connect timeout, read timeout)
+        
+        # Enhanced timeout configuration with endpoint-specific settings
+        self.default_timeout = (5, 30)  # (connect timeout, read timeout)
+        self.timeout_config = {
+            'bill': (8, 45),       # Bills can be large, longer timeout
+            'amendment': (8, 45),
+            'committee': (5, 30),  # Default timeout
+            'congress': (5, 20),   # Simple endpoint, shorter timeout
+            'default': (5, 30)     # Default fallback
+        }
+        
         self._current_congress = None  # Cache for current congress number
         self._response_cache = {}  # Cache for API responses
+        
+        # Track API stats
+        self.request_count = 0
+        self.error_count = 0
+        self.start_time = time.time()
 
     def _get_cached_response(self, endpoint: str, params: Dict) -> Optional[Dict]:
         """Get cached API response if available"""
@@ -133,12 +253,14 @@ class CongressBaseAPI:
         self.logger.debug(f"Cached response for {endpoint}")
 
     def _setup_session(self) -> requests.Session:
-        """Set up requests session with retry strategy"""
+        """Set up requests session with enhanced retry strategy"""
         session = requests.Session()
+        
+        # Enhanced retry strategy with more nuanced status forcelist and backoff
         retry_strategy = Retry(
-            total=3,  # Use fixed value since we have a separate RateLimiter
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
+            total=5,  # Increased from 3 to 5
+            backoff_factor=2,  # Increased from 1 to 2
+            status_forcelist=[429, 500, 502, 503, 504, 520, 521, 522, 524],
             allowed_methods=["HEAD", "GET", "OPTIONS"],
             respect_retry_after_header=True,
             raise_on_status=True
@@ -148,78 +270,211 @@ class CongressBaseAPI:
         session.mount("http://", adapter)
         return session
 
+    def get_timeout(self, endpoint: str) -> tuple:
+        """Get appropriate timeout for endpoint"""
+        return self.timeout_config.get(endpoint, self.timeout_config['default'])
+
+    def get_api_stats(self) -> Dict[str, Any]:
+        """Get statistics about API usage"""
+        uptime = time.time() - self.start_time
+        stats = {
+            'request_count': self.request_count,
+            'error_count': self.error_count,
+            'error_rate': (self.error_count / self.request_count * 100) if self.request_count > 0 else 0,
+            'uptime_seconds': uptime,
+            'uptime_formatted': self._format_duration(uptime),
+            'requests_per_second': self.request_count / uptime if uptime > 0 else 0,
+            'rate_limiter_stats': self.rate_limiter.get_stats()
+        }
+        return stats
+        
+    def _format_duration(self, seconds: float) -> str:
+        """Format seconds into human-readable duration"""
+        if seconds < 60:
+            return f"{seconds:.1f} seconds"
+
+        minutes = seconds // 60
+        remaining_seconds = seconds % 60
+
+        if minutes < 60:
+            return f"{int(minutes)} minutes {int(remaining_seconds)} seconds"
+
+        hours = minutes // 60
+        remaining_minutes = minutes % 60
+
+        return f"{int(hours)} hours {int(remaining_minutes)} minutes"
+
     def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Make API request with enhanced rate limiting and caching"""
+        """Make API request with enhanced rate limiting, error handling and caching"""
         if params is None:
             params = {}
         params['api_key'] = self.api_key
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        
+        # Extract endpoint name for rate limiting and tracking
+        endpoint_name = endpoint.split('/')[0]
 
         # Check cache first
-        cached = self._get_cached_response(endpoint, params)
+        cached = self._get_cached_response(endpoint_name, params)
         if cached:
             return cached
 
         # Apply rate limiting
-        self.rate_limiter.wait(endpoint)
+        self.rate_limiter.wait(endpoint_name)
         start_time = time.time()
+        self.request_count += 1
         
         try:
-            self.logger.debug(f"Making request to {url} with params: {json.dumps({k: v for k, v in params.items() if k != 'api_key'}, indent=2)}")
+            # Use endpoint-specific timeout
+            timeout = self.get_timeout(endpoint_name)
+            
+            # Log detailed request information at DEBUG level
+            self.logger.debug(
+                f"Making request to {url} with params: "
+                f"{json.dumps({k: v for k, v in params.items() if k != 'api_key'}, indent=2)}, "
+                f"timeout: {timeout}"
+            )
             
             # Track request metrics
-            metrics.track_api_request_start(endpoint)
+            metrics.track_api_request_start(endpoint_name)
             
-            response = self.session.get(url, params=params, timeout=self.timeout)
+            response = self.session.get(url, params=params, timeout=timeout)
             duration = time.time() - start_time
             
             metrics.track_api_request(
-                endpoint=endpoint,
+                endpoint=endpoint_name,
                 status_code=response.status_code,
                 duration=duration
             )
 
             if response.status_code == 200:
-                self.rate_limiter.record_success(endpoint)
-                response_json = response.json()
-                # Cache successful response
-                self._cache_response(endpoint, params, response_json)
-                self.logger.debug(f"Response data: {json.dumps(response_json, indent=2)}")
-                return response_json
+                self.rate_limiter.record_success(endpoint_name)
+                
+                # Try to parse JSON response
+                try:
+                    response_json = response.json()
+                    # Cache successful response
+                    self._cache_response(endpoint_name, params, response_json)
+                    
+                    # Log response size and structure 
+                    response_size = len(response.text)
+                    self.logger.debug(
+                        f"Response for {endpoint_name}: status={response.status_code}, "
+                        f"size={response_size} bytes, duration={duration:.2f}s"
+                    )
+                    
+                    # Only log full response at trace level (very verbose)
+                    if self.logger.isEnabledFor(logging.DEBUG):
+                        self.logger.debug(f"Response data structure: {list(response_json.keys())}")
+                    
+                    return response_json
+                except json.JSONDecodeError as e:
+                    self.error_count += 1
+                    self.rate_limiter.record_error(endpoint_name, 'json_decode')
+                    self.logger.error(
+                        f"Failed to decode JSON from {endpoint_name} response: {str(e)}, "
+                        f"Response: {response.text[:200]}..."
+                    )
+                    raise Exception(f"Invalid JSON response from {endpoint_name}")
 
+            # Handle rate limiting with retry-after
             if response.status_code == 429:
+                self.error_count += 1
                 retry_after = response.headers.get('Retry-After', 60)
-                self.logger.error(f"Rate limit exceeded for {endpoint}. Retry after {retry_after} seconds")
-                self.rate_limiter.record_error(endpoint)
-                time.sleep(float(retry_after))
-                raise Exception(f"Rate limit exceeded for {endpoint}")
+                try:
+                    retry_after = float(retry_after)
+                except (ValueError, TypeError):
+                    retry_after = 60
+                
+                # Add jitter to avoid thundering herd
+                retry_after = retry_after * uniform(1.0, 1.2)
+                
+                self.logger.error(
+                    f"Rate limit exceeded for {endpoint_name}. "
+                    f"Retry after {retry_after:.1f} seconds. "
+                    f"Headers: {dict(response.headers)}"
+                )
+                self.rate_limiter.record_error(endpoint_name, 'rate_limit')
+                time.sleep(retry_after)
+                raise Exception(f"Rate limit exceeded for {endpoint_name}")
 
+            # Handle authentication failures
             if response.status_code == 403:
-                self.logger.error(f"API authentication failed for {endpoint}. Please verify API key.")
+                self.error_count += 1
+                self.rate_limiter.record_error(endpoint_name, 'auth_error')
+                self.logger.error(
+                    f"API authentication failed for {endpoint_name}. "
+                    f"Please verify API key. Response: {response.text}"
+                )
                 raise Exception("API authentication failed - please verify API key")
-
-            self.logger.error(f"Unexpected status code {response.status_code} for {url}: {response.text}")
-            self.rate_limiter.record_error(endpoint)
+            
+            # Handle 404 errors
+            if response.status_code == 404:
+                self.error_count += 1
+                self.rate_limiter.record_error(endpoint_name, 'not_found')
+                self.logger.warning(
+                    f"Resource not found for {endpoint_name}: {url}. "
+                    f"Response: {response.text}"
+                )
+                # Return empty dict instead of raising exception
+                return {}
+            
+            # Handle server errors
+            if response.status_code >= 500:
+                self.error_count += 1
+                self.rate_limiter.record_error(endpoint_name, 'server_error')
+                self.logger.error(
+                    f"Server error {response.status_code} from {endpoint_name}: "
+                    f"{response.text[:200]}..."
+                )
+                # Let this propagate to retry mechanism
+                response.raise_for_status()
+            
+            # Handle other unexpected status codes
+            self.logger.error(
+                f"Unexpected status code {response.status_code} for {url}: {response.text}"
+            )
+            self.error_count += 1
+            self.rate_limiter.record_error(endpoint_name, f'status_{response.status_code}')
             response.raise_for_status()
             return {}
 
         except requests.exceptions.Timeout as e:
             duration = time.time() - start_time
-            self.logger.error(f"Request timed out for endpoint {endpoint}: {str(e)}")
-            self.rate_limiter.record_error(endpoint)
+            self.error_count += 1
+            self.logger.error(
+                f"Request timed out for endpoint {endpoint_name} after {duration:.2f}s: {str(e)}"
+            )
+            self.rate_limiter.record_error(endpoint_name, 'timeout')
             metrics.track_api_request(
-                endpoint=endpoint,
+                endpoint=endpoint_name,
                 status_code=408,
                 duration=duration
             )
-            raise Exception(f"Request timed out: {str(e)}")
+            
+            # More informative timeout error
+            timeout_type = "connect" if duration < 5 else "read"
+            raise Exception(f"{timeout_type.capitalize()} timeout for {endpoint_name}: {str(e)}")
 
+        except requests.exceptions.ConnectionError as e:
+            duration = time.time() - start_time
+            self.error_count += 1
+            self.logger.error(f"Connection error for {endpoint_name}: {str(e)}")
+            self.rate_limiter.record_error(endpoint_name, 'connection')
+            metrics.track_api_request(
+                endpoint=endpoint_name,
+                status_code=503,  # Use 503 Service Unavailable for connection errors
+                duration=duration
+            )
+            raise Exception(f"Connection error: {str(e)}")
+            
         except requests.exceptions.RequestException as e:
             duration = time.time() - start_time
+            self.error_count += 1
             self.logger.error(f"Request failed for {url}: {str(e)}")
-            self.rate_limiter.record_error(endpoint)
+            self.rate_limiter.record_error(endpoint_name, 'request_error')
             metrics.track_api_request(
-                endpoint=endpoint,
+                endpoint=endpoint_name,
                 status_code=500,
                 duration=duration
             )

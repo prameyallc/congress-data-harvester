@@ -20,6 +20,7 @@ class DynamoHandler:
         self.table = None
         self.logger = logging.getLogger('congress_downloader')
         self._ensure_table_exists()
+        self.processed_item_ids = set()  # Track processed item IDs to prevent duplicates
 
     def _ensure_table_exists(self):
         """Ensure DynamoDB table exists and is ready with optimized indexes"""
@@ -266,75 +267,10 @@ class DynamoHandler:
             self.logger.error(f"Failed to create table: {str(e)}")
             raise
 
-    def query_by_type_and_date_range(self, item_type: str, start_date: str, end_date: str) -> List[Dict[str, Any]]:
-        """Query items by type and date range using GSI or fallback to scan"""
-        try:
-            # First try using the GSI if it exists
-            try:
-                response = self.table.query(
-                    IndexName='type-update_date-index',
-                    KeyConditionExpression='#type = :type AND #update_date BETWEEN :start_date AND :end_date',
-                    ExpressionAttributeNames={
-                        '#type': 'type',
-                        '#update_date': 'update_date'
-                    },
-                    ExpressionAttributeValues={
-                        ':type': item_type,
-                        ':start_date': start_date,
-                        ':end_date': end_date
-                    }
-                )
-                items = response.get('Items', [])
-                self.logger.info(f"Retrieved {len(items)} items of type {item_type} between {start_date} and {end_date} using GSI")
-                return items
-
-            except ClientError as e:
-                if 'ValidationException' in str(e) and 'index' in str(e):
-                    # Index doesn't exist, fall back to scan with filter
-                    self.logger.warning(f"Index not available, falling back to scan operation for type {item_type}")
-                    response = self.table.scan(
-                        FilterExpression='#type = :type AND #update_date BETWEEN :start_date AND :end_date',
-                        ExpressionAttributeNames={
-                            '#type': 'type',
-                            '#update_date': 'update_date'
-                        },
-                        ExpressionAttributeValues={
-                            ':type': item_type,
-                            ':start_date': start_date,
-                            ':end_date': end_date
-                        }
-                    )
-                    items = response.get('Items', [])
-                    self.logger.info(f"Retrieved {len(items)} items of type {item_type} between {start_date} and {end_date} using scan")
-                    return items
-                else:
-                    raise
-
-        except ClientError as e:
-            self.logger.error(f"DynamoDB operation failed: {str(e)}")
-            raise Exception(f"DynamoDB operation failed: {str(e)}")
-
-    def query_by_congress_and_number(self, congress: int, number: int) -> List[Dict[str, Any]]:
-        """Query items by congress and number using GSI"""
-        try:
-            response = self.table.query(
-                IndexName='congress-number-index',
-                KeyConditionExpression='congress = :congress AND #number = :number',
-                ExpressionAttributeNames={
-                    '#number': 'number'
-                },
-                ExpressionAttributeValues={
-                    ':congress': congress,
-                    ':number': number
-                }
-            )
-            items = response.get('Items', [])
-            self.logger.info(f"Retrieved {len(items)} items for congress {congress} and number {number}")
-            return items
-
-        except ClientError as e:
-            self.logger.error(f"DynamoDB query operation failed: {str(e)}")
-            raise Exception(f"DynamoDB query operation failed: {str(e)}")
+    def reset_processed_ids(self):
+        """Reset the set of processed item IDs"""
+        self.processed_item_ids.clear()
+        self.logger.info("Reset processed item ID tracking")
 
     def store_item(self, item: Dict[str, Any], ttl_hours: int = 0) -> None:
         """Store a single item in DynamoDB"""
@@ -345,6 +281,11 @@ class DynamoHandler:
         try:
             if 'id' not in item:
                 raise ValueError("Item must have an 'id' attribute")
+
+            # Check if item has already been processed
+            if item['id'] in self.processed_item_ids:
+                self.logger.info(f"Skipping duplicate item with ID: {item['id']}")
+                return
 
             # Add timestamp for tracking
             item['timestamp'] = int(time.time())
@@ -364,6 +305,9 @@ class DynamoHandler:
                     ':new_update_date': item.get('update_date', '0')
                 }
             )
+
+            # Mark item as processed
+            self.processed_item_ids.add(item['id'])
 
             duration = time.time() - start_time
             metrics.track_dynamo_operation(
@@ -389,25 +333,51 @@ class DynamoHandler:
 
             if error_code == 'ConditionalCheckFailedException':
                 self.logger.info(f"Skipping item {item['id']} as a newer version exists")
+                # Still mark item as processed to avoid further attempts
+                self.processed_item_ids.add(item['id'])
                 return
 
             self.logger.error(f"DynamoDB operation failed for item {item['id']}: Code={error_code}, Message={error_msg}")
             raise
 
     def batch_store_items(self, items: List[Dict[str, Any]], ttl_hours: int = 0) -> Tuple[int, List[Dict[str, Any]]]:
-        """Store multiple items in DynamoDB using batch write"""
+        """Store multiple items in DynamoDB using batch write with deduplication"""
         if not self.table:
             raise Exception("DynamoDB table not initialized")
 
         successful_items = 0
         failed_items = []
+        duplicate_items = 0
+
+        # First, deduplicate the input list based on item ID
+        deduplicated_items = []
+        item_ids_in_batch = set()
+
+        for item in items:
+            if 'id' not in item:
+                self.logger.warning(f"Skipping item without ID: {json.dumps(item, cls=DecimalEncoder)}")
+                continue
+
+            item_id = item['id']
+
+            # Skip if already processed in this session or in this batch
+            if item_id in self.processed_item_ids or item_id in item_ids_in_batch:
+                self.logger.debug(f"Skipping duplicate item with ID: {item_id}")
+                duplicate_items += 1
+                continue
+
+            deduplicated_items.append(item)
+            item_ids_in_batch.add(item_id)
 
         # Process items in batches of 25 (DynamoDB limit)
         batch_size = 25
-        total_batches = len(items) // batch_size + (1 if len(items) % batch_size > 0 else 0)
+        total_batches = len(deduplicated_items) // batch_size + (1 if len(deduplicated_items) % batch_size > 0 else 0)
 
-        for batch_num, i in enumerate(range(0, len(items), batch_size), 1):
-            batch_items = items[i:i + batch_size]
+        if duplicate_items > 0:
+            self.logger.info(f"Skipped {duplicate_items} duplicate items before batch processing")
+
+        for batch_num, i in enumerate(range(0, len(deduplicated_items), batch_size), 1):
+            batch_items = deduplicated_items[i:i + batch_size]
             self.logger.info(f"Processing batch {batch_num}/{total_batches} with {len(batch_items)} items")
 
             start_time = time.time()
@@ -415,10 +385,6 @@ class DynamoHandler:
                 with self.table.batch_writer() as batch:
                     for item in batch_items:
                         try:
-                            if 'id' not in item:
-                                self.logger.warning(f"Skipping item without ID: {json.dumps(item, cls=DecimalEncoder)}")
-                                continue
-
                             # Add timestamp and TTL
                             item['timestamp'] = int(time.time())
                             if ttl_hours > 0:
@@ -433,6 +399,8 @@ class DynamoHandler:
 
                             batch.put_item(Item=item)
                             successful_items += 1
+                            # Mark as processed
+                            self.processed_item_ids.add(item['id'])
                             self.logger.info(f"Successfully stored item with ID: {item.get('id')}")
 
                         except Exception as e:
@@ -469,7 +437,7 @@ class DynamoHandler:
                     'item': item
                 } for item in batch_items])
 
-        self.logger.info(f"Batch write completed: {successful_items} items successful, {len(failed_items)} failed")
+        self.logger.info(f"Batch write completed: {successful_items} items successful, {len(failed_items)} failed, {duplicate_items} duplicates skipped")
         if failed_items:
             self.logger.warning("Failed items summary:")
             failed_by_type = {}
@@ -578,3 +546,51 @@ class DynamoHandler:
         except ClientError as e:
             self.logger.error(f"DynamoDB query operation failed: {str(e)}")
             raise Exception(f"DynamoDB query operation failed: {str(e)}")
+
+    def query_by_type_and_date_range(self, item_type: str, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+        """Query items by type and date range using GSI or fallback to scan"""
+        try:
+            # First try using the GSI if it exists
+            try:
+                response = self.table.query(
+                    IndexName='type-update_date-index',
+                    KeyConditionExpression='#type = :type AND #update_date BETWEEN :start_date AND :end_date',
+                    ExpressionAttributeNames={
+                        '#type': 'type',
+                        '#update_date': 'update_date'
+                    },
+                    ExpressionAttributeValues={
+                        ':type': item_type,
+                        ':start_date': start_date,
+                        ':end_date': end_date
+                    }
+                )
+                items = response.get('Items', [])
+                self.logger.info(f"Retrieved {len(items)} items of type {item_type} between {start_date} and {end_date} using GSI")
+                return items
+
+            except ClientError as e:
+                if 'ValidationException' in str(e) and 'index' in str(e):
+                    # Index doesn't exist, fall back to scan with filter
+                    self.logger.warning(f"Index not available, falling back to scan operation for type {item_type}")
+                    response = self.table.scan(
+                        FilterExpression='#type = :type AND #update_date BETWEEN :start_date AND :end_date',
+                        ExpressionAttributeNames={
+                            '#type': 'type',
+                            '#update_date': 'update_date'
+                        },
+                        ExpressionAttributeValues={
+                            ':type': item_type,
+                            ':start_date': start_date,
+                            ':end_date': end_date
+                        }
+                    )
+                    items = response.get('Items', [])
+                    self.logger.info(f"Retrieved {len(items)} items of type {item_type} between {start_date} and {end_date} using scan")
+                    return items
+                else:
+                    raise
+
+        except ClientError as e:
+            self.logger.error(f"DynamoDB operation failed: {str(e)}")
+            raise Exception(f"DynamoDB operation failed: {str(e)}")

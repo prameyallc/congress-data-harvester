@@ -56,17 +56,33 @@ def start_monitoring():
 def cleanup(signum, frame):
     """Cleanup function for graceful shutdown"""
     logger.info("Shutting down Congress Downloader...")
+
+    # Generate and log final metrics reports
+    try:
+        api_report = metrics.generate_api_metrics_report()
+        logger.info("\n" + api_report)
+
+        ingestion_report = metrics.generate_ingestion_report()
+        logger.info("\n" + ingestion_report)
+    except Exception as e:
+        logger.error(f"Failed to generate metrics reports: {str(e)}")
+
+    # Flush metrics
     metrics.flush_metrics()
     sys.exit(0)
 
 def process_date_chunk(api_client: CongressAPI, db_handler: DynamoHandler, 
-                      dates: List[datetime], logger) -> Tuple[int, List[Dict]]:
+                       dates: List[datetime], logger) -> Tuple[int, List[Dict]]:
     """Process a chunk of dates in parallel"""
     total_items = 0
     chunk_failed_dates = []
 
     for date in dates:
         try:
+            # Reset processed IDs tracking for each date to prevent duplicates
+            # while still maintaining clean state for each date
+            db_handler.reset_processed_ids()
+
             date_str = date.strftime('%Y-%m-%d')
             logger.info(f"Processing date: {date_str}")
 
@@ -85,6 +101,8 @@ def process_date_chunk(api_client: CongressAPI, db_handler: DynamoHandler,
             logger.info(f"Retrieved data for {date_str}:")
             for item_type, count in type_counts.items():
                 logger.info(f"  - {item_type}: {count} items")
+                # Track endpoint-specific metrics for reporting
+                metrics.track_items_processed(item_type, count)
 
             # If we have committee data, log a sample for debugging
             committee_items = [item for item in data if item.get('type') == 'committee']
@@ -108,6 +126,8 @@ def process_date_chunk(api_client: CongressAPI, db_handler: DynamoHandler,
 
                 for item_type, count in failed_by_type.items():
                     logger.warning(f"  - {item_type}: {count} failed items")
+                    # Track failed items by type
+                    metrics.track_items_processed(item_type, 0, 0, count)
 
                 chunk_failed_dates.append({
                     'date': date,
@@ -126,9 +146,16 @@ def process_date_chunk(api_client: CongressAPI, db_handler: DynamoHandler,
     return total_items, chunk_failed_dates
 
 def process_date_range(api_client: CongressAPI, db_handler: DynamoHandler, 
-                      start_date: datetime, end_date: datetime, logger,
-                      max_workers: int = 3) -> Tuple[int, List[Dict]]:
+                       start_date: datetime, end_date: datetime, logger,
+                       max_workers: int = 3) -> Tuple[int, List[Dict]]:
     """Process data for a specific date range using parallel processing"""
+    # Reset processed IDs tracking at the beginning of each date range
+    # This ensures we start with a clean slate for each range
+    db_handler.reset_processed_ids()
+
+    # Reset metrics tracking for a new session
+    metrics.reset_stats()
+
     current_date = start_date
     dates = []
     while current_date <= end_date:
@@ -177,11 +204,29 @@ def process_date_range(api_client: CongressAPI, db_handler: DynamoHandler,
             if 'failed_items' in failed:
                 logger.info(f"Failed items count: {len(failed['failed_items'])}")
 
+    # Generate and log metrics reports at the end of processing
+    api_report = metrics.generate_api_metrics_report()
+    logger.info("\n" + api_report)
+
+    ingestion_report = metrics.generate_ingestion_report()
+    logger.info("\n" + ingestion_report)
+
+    # Get API client statistics
+    api_stats = api_client.get_api_stats()
+    logger.info(f"API Client Statistics:")
+    logger.info(f"  Total requests: {api_stats['request_count']}")
+    logger.info(f"  Error rate: {api_stats['error_rate']:.2f}%")
+    logger.info(f"  Uptime: {api_stats['uptime_formatted']}")
+    logger.info(f"  Requests per second: {api_stats['requests_per_second']:.2f}")
+
     return total_items_processed, all_failed_dates
 
 def process_bulk_download(api_client, db_handler, logger):
     """Process complete bulk download of available data"""
     try:
+        # Reset processed IDs tracking at the beginning of bulk download
+        db_handler.reset_processed_ids()
+
         # Get earliest available date from API
         start_date = api_client.get_earliest_date()
         end_date = datetime.now()
@@ -260,8 +305,15 @@ def main():
                        help='Days to look back for incremental update')
     parser.add_argument('--parallel-workers', type=int, default=3,
                        help='Number of parallel workers for processing')
+    parser.add_argument('--verbose', action='store_true',
+                       help='Enable verbose logging')
 
     args = parser.parse_args()
+
+    # Set log level based on verbose flag
+    if args.verbose:
+        logger.setLevel('DEBUG')
+        logger.info("Verbose logging enabled")
 
     try:
         logger.info("Initializing Congress API client...")
@@ -269,6 +321,9 @@ def main():
 
         logger.info("Initializing DynamoDB handler...")
         db_handler = DynamoHandler(config['dynamodb'])
+
+        # Reset processed IDs tracking at the start of a new session
+        db_handler.reset_processed_ids()
 
         if args.mode == 'bulk':
             logger.info("Starting bulk download")
@@ -306,8 +361,29 @@ def main():
 
     except Exception as e:
         logger.error(f"Fatal error: {str(e)}", exc_info=True)
+
+        # Generate final metrics reports even on error
+        try:
+            api_report = metrics.generate_api_metrics_report()
+            logger.info("\n" + api_report)
+
+            ingestion_report = metrics.generate_ingestion_report()
+            logger.info("\n" + ingestion_report)
+        except Exception as report_err:
+            logger.error(f"Failed to generate metrics reports: {str(report_err)}")
+
         metrics.flush_metrics()
         sys.exit(1)
+
+    # Generate final metrics reports on success
+    try:
+        api_report = metrics.generate_api_metrics_report()
+        logger.info("\n" + api_report)
+
+        ingestion_report = metrics.generate_ingestion_report()
+        logger.info("\n" + ingestion_report)
+    except Exception as e:
+        logger.error(f"Failed to generate metrics reports: {str(e)}")
 
     # Ensure final metrics are sent
     metrics.flush_metrics()
