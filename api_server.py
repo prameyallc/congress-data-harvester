@@ -30,6 +30,12 @@ logger = setup_logger(log_config)
 # Initialize Flask app
 app = Flask(__name__)
 
+# Import our export utilities
+import os
+import csv
+import tempfile
+from export_data import export_to_json, export_to_csv, get_data_from_dynamodb
+
 # Initialize DynamoDB client
 try:
     dynamodb = boto3.resource('dynamodb', region_name=os.environ.get('AWS_DEFAULT_REGION', 'us-west-2'))
@@ -52,6 +58,18 @@ spec = APISpec(
     ),
     plugins=[FlaskPlugin(), MarshmallowPlugin()],
 )
+
+# Create export schema
+spec.components.schema("ExportOptions", {
+    "type": "object",
+    "properties": {
+        "format": {"type": "string", "enum": ["json", "csv"], "description": "Export format"},
+        "data_type": {"type": "string", "enum": ["bill", "committee", "hearing", "amendment", "nomination", "treaty"], "description": "Type of data to export"},
+        "congress": {"type": "integer", "description": "Congress number to filter by"},
+        "start_date": {"type": "string", "format": "date", "description": "Start date for filtering (YYYY-MM-DD)"},
+        "end_date": {"type": "string", "format": "date", "description": "End date for filtering (YYYY-MM-DD)"}
+    }
+})
 
 # Define schemas for Swagger documentation
 spec.components.schema("Error", {
@@ -225,6 +243,7 @@ def home():
             "amendments": "/api/amendments",
             "nominations": "/api/nominations",
             "treaties": "/api/treaties",
+            "export": "/api/export",
         },
         "status": "operational"
     })
@@ -1109,12 +1128,141 @@ with app.test_request_context():
     spec.path(view=get_amendments)
     spec.path(view=get_nominations)
     spec.path(view=get_treaties)
+    spec.path(view=export_data)
 
 # Write OpenAPI spec to file
 with open('static/swagger.json', 'w') as f:
     json.dump(spec.to_dict(), f)
 
 # Serve static files
+@app.route('/api/export')
+def export_data():
+    """
+    Export congressional data to JSON or CSV.
+    ---
+    get:
+      summary: Export data
+      description: Export congressional data with optional filtering to JSON or CSV format
+      parameters:
+        - in: query
+          name: format
+          schema:
+            type: string
+            enum: [json, csv]
+            default: json
+          description: Export format
+        - in: query
+          name: data_type
+          schema:
+            type: string
+            enum: [bill, committee, hearing, amendment, nomination, treaty]
+          description: Type of data to export
+        - in: query
+          name: congress
+          schema:
+            type: integer
+          description: Filter by congress number (e.g., 117)
+        - in: query
+          name: start_date
+          schema:
+            type: string
+            format: date
+          description: Filter by update date (start date, format YYYY-MM-DD)
+        - in: query
+          name: end_date
+          schema:
+            type: string
+            format: date
+          description: Filter by update date (end date, format YYYY-MM-DD)
+      responses:
+        200:
+          description: Successful response, returns file download
+          content:
+            application/json:
+              schema:
+                type: string
+                format: binary
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        400:
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        500:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    """
+    try:
+        if not table:
+            return jsonify({"error": "DynamoDB not configured", "status": 500}), 500
+            
+        # Parse query parameters
+        export_format = request.args.get('format', 'json').lower()
+        data_type = request.args.get('data_type')
+        congress = request.args.get('congress')
+        if congress:
+            congress = int(congress)
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date', datetime.now().strftime('%Y-%m-%d'))
+        
+        # Validate export format
+        if export_format not in ['json', 'csv']:
+            return jsonify({"error": "Invalid export format. Use 'json' or 'csv'", "status": 400}), 400
+            
+        # Load configuration for DynamoDB client
+        config = {
+            'dynamodb_table': table_name,
+            'region': os.environ.get('AWS_DEFAULT_REGION', 'us-west-2')
+        }
+        
+        # Get data from DynamoDB with filtration
+        data = get_data_from_dynamodb(config, data_type, congress, start_date, end_date)
+        
+        if not data:
+            return jsonify({"error": "No data found matching the criteria", "status": 404}), 404
+            
+        # Create a temporary file for the export
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{export_format}') as temp_file:
+            temp_path = temp_file.name
+            
+        # Export the data to the appropriate format
+        if export_format == 'json':
+            export_to_json(data, temp_path)
+            mimetype = 'application/json'
+        else:  # csv
+            export_to_csv(data, temp_path)
+            mimetype = 'text/csv'
+            
+        # Generate a timestamp for the filename
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        type_str = data_type if data_type else 'all'
+        filename = f"{type_str}_export_{timestamp}.{export_format}"
+        
+        # Return the file as a download
+        return send_from_directory(os.path.dirname(temp_path), 
+                                   os.path.basename(temp_path),
+                                   as_attachment=True,
+                                   attachment_filename=filename,
+                                   mimetype=mimetype)
+                                   
+    except ValueError as e:
+        logger.error(f"Invalid parameter: {str(e)}")
+        return jsonify({"error": f"Invalid parameter: {str(e)}", "status": 400}), 400
+    except ClientError as e:
+        logger.error(f"DynamoDB error: {str(e)}")
+        return jsonify({"error": f"Database error: {str(e)}", "status": 500}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return jsonify({"error": f"Unexpected error: {str(e)}", "status": 500}), 500
+
+
 @app.route('/static/<path:path>')
 def send_static(path):
     return send_from_directory('static', path)

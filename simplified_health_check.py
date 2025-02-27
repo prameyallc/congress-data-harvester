@@ -3,8 +3,7 @@ import json
 import sys
 import boto3
 import requests
-from congress_api import CongressAPI
-from logger_config import setup_logger
+from simplified_congress_api import CongressAPI
 import os
 import time
 from botocore.exceptions import ClientError
@@ -134,7 +133,7 @@ def check_congress_api_endpoints(config):
         return {
             'status': 'healthy',
             'available_endpoints': endpoints,
-            'endpoint_count': len(endpoints)
+            'endpoint_count': endpoints.get('endpoint_count', 0)
         }
     except Exception as e:
         logger.error(f"Failed to get Congress.gov API endpoints: {str(e)}")

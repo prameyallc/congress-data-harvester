@@ -4,6 +4,7 @@ modules = ["python-3.11"]
 channel = "stable-24_05"
 
 [workflows]
+runButton = "Project"
 
 [[workflows.workflow]]
 name = "Project"
@@ -33,6 +34,26 @@ args = "Test Congress API"
 [[workflows.workflow.tasks]]
 task = "workflow.run"
 args = "API Server"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Run Bug Fixes"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Fix Duplicates"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Fix Broken API"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Simplified Health Check"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Fix Import Issues"
 
 [[workflows.workflow]]
 name = "Congress Data Downloader"
@@ -118,6 +139,76 @@ task = "packager.installForAll"
 task = "shell.exec"
 args = "python api_server.py"
 waitForPort = 5000
+
+[[workflows.workflow]]
+name = "Run Bug Fixes"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python run_fix_bugs.py"
+
+[[workflows.workflow]]
+name = "Fix Duplicates"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python fix_duplicates.py"
+
+[[workflows.workflow]]
+name = "Fix Broken API"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python fix_broken_api.py"
+
+[[workflows.workflow]]
+name = "Simplified Health Check"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python simplified_health_check.py"
+
+[[workflows.workflow]]
+name = "Fix Import Issues"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python fix_import_issues.py"
 
 [deployment]
 run = ["sh", "-c", "python congress_downloader.py --mode refresh --start-date 2024-01-20 --end-date 2024-01-20 --verbose"]
