@@ -112,7 +112,13 @@ def get_data_from_dynamodb(config, data_type=None, congress=None, start_date=Non
         else:
             logger.warning("No specific query parameters provided, using broader scan (this may be slow)")
             # This would be a full table scan - potentially expensive and slow
-            return db_handler.scan_by_type(None)
+            # Get all items with a scan (careful, this could be slow and expensive)
+            try:
+                scan_result = db_handler.table.scan(Limit=1000)  # Limit to 1000 items for safety
+                return scan_result.get('Items', [])
+            except Exception as scan_error:
+                logger.error(f"Full scan failed: {str(scan_error)}")
+                return []
     except Exception as e:
         logger.error(f"Failed to query DynamoDB: {str(e)}")
         return []

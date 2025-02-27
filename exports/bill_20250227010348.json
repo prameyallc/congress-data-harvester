@@ -1,0 +1,37 @@
+[
+  {
+    "version": "1",
+    "bill_number": "3076",
+    "bill_type": "hr",
+    "origin_chamber": "House",
+    "timestamp": "1740198635",
+    "origin_chamber_code": "H",
+    "expiry_time": "1740202235",
+    "latest_action": {
+      "action_date": "2024-02-22",
+      "text": "Test action"
+    },
+    "congress": "117",
+    "id": "test_bill_1740198635",
+    "type": "bill",
+    "title": "Test Bill for DynamoDB Permissions",
+    "update_date": "2024-02-22"
+  },
+  {
+    "version": "1",
+    "bill_number": "3076",
+    "bill_type": "hr",
+    "origin_chamber": "House",
+    "timestamp": "1740177698",
+    "latest_action": {
+      "action_date": "2022-04-06",
+      "text": "Became Public Law No: 117-108."
+    },
+    "origin_chamber_code": "H",
+    "congress": "117",
+    "id": "test_117-hr-3076",
+    "type": "bill",
+    "title": "Postal Service Reform Act of 2022",
+    "update_date": "2022-09-29"
+  }
+]

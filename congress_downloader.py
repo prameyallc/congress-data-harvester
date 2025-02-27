@@ -2,6 +2,7 @@
 import argparse
 import json
 import sys
+import os
 from datetime import datetime, timedelta
 import time
 import boto3
@@ -15,6 +16,7 @@ import signal
 import concurrent.futures
 from queue import Queue
 from typing import List, Dict, Any, Tuple
+from export_data import export_to_json, export_to_csv, get_data_from_dynamodb
 
 def load_config():
     try:
@@ -296,8 +298,8 @@ def main():
         sys.exit(1)
 
     parser = argparse.ArgumentParser(description='Congress.gov Data Downloader')
-    parser.add_argument('--mode', choices=['bulk', 'incremental', 'refresh'],
-                       required=True, help='Download mode')
+    parser.add_argument('--mode', choices=['bulk', 'incremental', 'refresh', 'export'],
+                       required=True, help='Download mode or export data')
     parser.add_argument('--start-date', help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date', help='End date (YYYY-MM-DD)')
     parser.add_argument('--lookback-days', type=int,
@@ -307,6 +309,13 @@ def main():
                        help='Number of parallel workers for processing')
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose logging')
+    # Export-specific arguments
+    parser.add_argument('--format', choices=['json', 'csv'], default='json',
+                       help='Export format (for export mode)')
+    parser.add_argument('--data-type', choices=['bill', 'committee', 'hearing', 'amendment', 'nomination', 'treaty'],
+                       help='Type of data to export (for export mode)')
+    parser.add_argument('--congress', type=int, help='Congress number (for export mode, e.g., 117)')
+    parser.add_argument('--output', help='Output file path (for export mode)')
 
     args = parser.parse_args()
 
@@ -325,7 +334,68 @@ def main():
         # Reset processed IDs tracking at the start of a new session
         db_handler.reset_processed_ids()
 
-        if args.mode == 'bulk':
+        if args.mode == 'export':
+            logger.info("Starting data export")
+            
+            # Process dates if provided
+            start_date = None
+            end_date = None
+            if args.start_date:
+                start_date = parse_date(args.start_date)
+                if not start_date:
+                    logger.error("Invalid start date format. Use YYYY-MM-DD.")
+                    sys.exit(1)
+            if args.end_date:
+                end_date = parse_date(args.end_date)
+                if not end_date:
+                    logger.error("Invalid end date format. Use YYYY-MM-DD.")
+                    sys.exit(1)
+            
+            # Convert congress to int if provided
+            congress = None
+            if args.data_type:
+                # Handle congress argument if provided
+                try:
+                    if hasattr(args, 'congress') and args.congress is not None:
+                        congress = int(args.congress)
+                except ValueError:
+                    logger.error("Congress must be an integer value")
+                    sys.exit(1)
+                    
+            # Generate default output filename if not specified
+            output_file = args.output
+            if not output_file:
+                # Create exports directory if it doesn't exist
+                os.makedirs('exports', exist_ok=True)
+                
+                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+                type_str = args.data_type if args.data_type else 'all'
+                output_file = f"exports/{type_str}_{timestamp}.{args.format}"
+                
+            # Query data from DynamoDB
+            logger.info(f"Querying data from DynamoDB: type={args.data_type}, congress={congress}, dates={start_date}-{end_date}")
+            data = get_data_from_dynamodb(config['dynamodb'], args.data_type, congress, start_date, end_date)
+            
+            if not data:
+                logger.warning("No data found matching the criteria")
+                sys.exit(1)
+            
+            # Export data to the specified format
+            success = False
+            if args.format == 'json':
+                logger.info(f"Exporting {len(data)} records to JSON: {output_file}")
+                success = export_to_json(data, output_file)
+            elif args.format == 'csv':
+                logger.info(f"Exporting {len(data)} records to CSV: {output_file}")
+                success = export_to_csv(data, output_file)
+            
+            if success:
+                logger.info(f"Successfully exported {len(data)} records to {output_file}")
+            else:
+                logger.error("Export failed")
+                sys.exit(1)
+                
+        elif args.mode == 'bulk':
             logger.info("Starting bulk download")
             start_date = api_client.get_earliest_date()
             end_date = datetime.now()

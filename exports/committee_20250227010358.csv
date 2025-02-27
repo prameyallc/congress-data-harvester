@@ -1,0 +1,12 @@
+id,type,congress,update_date,chamber,name,subcommittees,system_code,timestamp,url,version
+119-house-hsgo16,committee,119,2025-01-16,house,Delivering on Government Efficiency Subcommittee,[],hsgo16,1740613602,https://api.congress.gov/v3/committee/house/hsgo16?format=json,1
+119-senate-ssju21,committee,119,2025-01-03,senate,Constitution Subcommittee,[],ssju21,1740613602,https://api.congress.gov/v3/committee/senate/ssju21?format=json,1
+119-senate-ssju01,committee,119,2025-01-03,senate,"Competition Policy, Antitrust, and Consumer Rights Subcommittee",[],ssju01,1740613602,https://api.congress.gov/v3/committee/senate/ssju01?format=json,1
+119-senate-sshr12,committee,119,2025-01-03,senate,Primary Health and Retirement Security Subcommittee,[],sshr12,1740613602,https://api.congress.gov/v3/committee/senate/sshr12?format=json,1
+119-senate-ssju04,committee,119,2025-01-03,senate,"Immigration, Citizenship, and Border Safety Subcommittee",[],ssju04,1740613602,https://api.congress.gov/v3/committee/senate/ssju04?format=json,1
+119-senate-ssju25,committee,119,2025-01-03,senate,"Federal Courts, Oversight, Agency Action, and Federal Rights Subcommittee",[],ssju25,1740613602,https://api.congress.gov/v3/committee/senate/ssju25?format=json,1
+119-senate-ssju22,committee,119,2025-01-03,senate,Criminal Justice and Counterterrorism Subcommittee,[],ssju22,1740613602,https://api.congress.gov/v3/committee/senate/ssju22?format=json,1
+119-senate-ssju26,committee,119,2025-01-03,senate,Intellectual Property Subcommittee,[],ssju26,1740613602,https://api.congress.gov/v3/committee/senate/ssju26?format=json,1
+119-senate-sshr09,committee,119,2025-01-03,senate,Children and Families Subcommittee,[],sshr09,1740613602,https://api.congress.gov/v3/committee/senate/sshr09?format=json,1
+119-senate-sshr11,committee,119,2025-01-03,senate,Employment and Workplace Safety Subcommittee,[],sshr11,1740613602,https://api.congress.gov/v3/committee/senate/sshr11?format=json,1
+119-senate-ssju27,committee,119,2025-01-03,senate,Human Rights and the Law Subcommittee,[],ssju27,1740613602,https://api.congress.gov/v3/committee/senate/ssju27?format=json,1
